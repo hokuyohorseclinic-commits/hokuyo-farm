@@ -17,6 +17,9 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
 <style>
@@ -473,8 +476,8 @@ function SaleModal({horseId,horseName,existing,onSave,onClose,share,curExit}){
 /* ===== localStorage ===== */
 const LS_KEY="hokuyo_0714s";
 const HOME_KEY="hokuyo_home";
-const APP_VER="v3.6";
-const APP_BUILD="2026-09-02";
+const APP_VER="v4.0";
+const APP_BUILD="2026-09-27";
 /* 現在地（このファイル／URLの場所）を人が読める形で返す */
 function curPlace(){
   try{
@@ -633,8 +636,304 @@ function migrateHorses(hs){
   });
 }
 
+/* ===== Firebase 連携（hokuyo-emr プロジェクトに相乗り・コレクションは farm_ で分離） ===== */
+const FB_CONFIG={apiKey:"AIzaSyCpBn2haBU1zEIepTpCwF8KeL5v_2_Lnzc",authDomain:"hokuyo-emr.firebaseapp.com",projectId:"hokuyo-emr",storageBucket:"hokuyo-emr.firebasestorage.app",messagingSenderId:"687686923750",appId:"1:687686923750:web:34853b887e5873f7fe9227"};
+let fbAuth=null,fbDb=null,FB_ERR=null;
+try{
+  if(typeof firebase==="undefined")throw new Error("Firebase を読み込めませんでした");
+  if(!firebase.apps.length)firebase.initializeApp(FB_CONFIG);
+  fbAuth=firebase.auth();fbDb=firebase.firestore();
+  fbDb.enablePersistence({synchronizeTabs:true}).catch(function(e){console.warn("persistence",e&&e.code)});
+}catch(e){FB_ERR=e.message||String(e);fbAuth=null;fbDb=null}
+const SYNC_KEYS=["horses","addrs","paidFlags","invNotes","selfCosts","selfSales","advCosts","insurances"];
+const COL_DATA="farm_data",COL_EXT="farm_extras",COL_RCPT="farm_receipts",COL_BK="farm_backups";
+const MAX_DOC=900000;
+function devLabel(){const u=navigator.userAgent;return /iPad|iPhone/.test(u)||(/Macintosh/.test(u)&&navigator.maxTouchPoints>1)?"iPad":/Mac/.test(u)?"Mac":"PC"}
+function fbErrMsg(e){
+  const c=(e&&e.code)||"";
+  if(c==="permission-denied")return "Firestore のルールで拒否されました。farm_ コレクションの読み書き許可が必要です。";
+  if(c==="unavailable")return "クラウドに接続できません（オフライン）";
+  if(c==="resource-exhausted")return "データが大きすぎて保存できません";
+  return (e&&e.message)||String(e);
+}
+/* 追加請求を「月ごとの明細（写真なし）」と「領収書写真」に分ける（Firestore の1件1MB制限対策） */
+function splitExtras(extras){
+  const months={},rcpt={};
+  Object.entries(extras||{}).forEach(function([ym,list]){
+    const arr=(list||[]).map(function(e){const{receiptImg,...rest}=e;if(receiptImg)rcpt[ym+"__"+e.id]=receiptImg;return rest});
+    months[ym]=JSON.stringify(arr);
+  });
+  return{months,rcpt};
+}
+function mergeExtras(months,rcpt){
+  const out={};
+  Object.entries(months).forEach(function([ym,j]){
+    let arr=[];try{arr=JSON.parse(j)||[]}catch(e){}
+    out[ym]=arr.map(function(e){const img=rcpt[ym+"__"+e.id];return img?{...e,receiptImg:img}:e});
+  });
+  return out;
+}
+function todayStr(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
+
+/* クラウド同期フック：各データを別ドキュメントに保存し、変わったものだけ送る */
+function useFarmSync(state,setters,user){
+  const[st,setSt]=useState({phase:"connecting",pending:false,lastSync:null,error:null,online:navigator.onLine,backupAt:null,lastBy:null});
+  const up=useCallback(p=>setSt(s=>({...s,...p})),[]);
+  const R=React.useRef({got:{},srv:{},remote:{},months:{},rcpt:{},pend:{},timer:null,backupDone:false});
+  const stRef=React.useRef(state);stRef.current=state;
+  const phaseRef=React.useRef("connecting");
+  const setPhase=p=>{phaseRef.current=p;up({phase:p})};
+
+  const checkReady=useCallback(()=>{
+    const r=R.current;
+    if(phaseRef.current==="error")return;
+    const trusted=!!r.remote.horses;
+    const dataOk=r.got.data&&(r.srv.data||trusted);
+    const extOk=r.got.ext&&(r.srv.ext||trusted);
+    const rcOk=r.got.rcpt&&(r.srv.rcpt||trusted);
+    if(!(dataOk&&extOk&&rcOk))return;
+    setPhase(trusted?"synced":"empty");
+  },[]);
+
+  /* 受信 */
+  useEffect(()=>{
+    if(!fbDb||!user)return;
+    const r=R.current;const uns=[];
+    const onErr=e=>{console.error(e);phaseRef.current="error";up({phase:"error",error:fbErrMsg(e)})};
+    const meta=(name,snap)=>{
+      r.pend[name]=snap.metadata.hasPendingWrites;
+      const pending=!!(r.pend.data||r.pend.ext||r.pend.rcpt);
+      const p={pending};
+      if(!snap.metadata.fromCache&&!pending)p.lastSync=Date.now();
+      up(p);
+    };
+    uns.push(fbDb.collection(COL_DATA).onSnapshot({includeMetadataChanges:true},snap=>{
+      snap.docChanges().forEach(ch=>{
+        const k=ch.doc.id;if(!SYNC_KEYS.includes(k))return;
+        if(ch.type==="removed"){delete r.remote[k];return}
+        const d=ch.doc.data()||{};
+        if(d.json===r.remote[k])return;
+        r.remote[k]=d.json;
+        try{setters[k](JSON.parse(d.json))}catch(e){console.error(e)}
+        if(k==="horses"&&d.by)up({lastBy:d.by+" "+(d.at?new Date(d.at).toLocaleString("ja-JP"):"")});
+      });
+      r.got.data=true;if(!snap.metadata.fromCache)r.srv.data=true;
+      meta("data",snap);checkReady();
+    },onErr));
+    const rebuild=()=>{r.extDirty=true;if(r.got.ext&&r.got.rcpt){r.extDirty=false;setters.extras(mergeExtras(r.months,r.rcpt))}};
+    uns.push(fbDb.collection(COL_EXT).onSnapshot({includeMetadataChanges:true},snap=>{
+      let changed=false;
+      snap.docChanges().forEach(ch=>{
+        const ym=ch.doc.id;
+        if(ch.type==="removed"){if(ym in r.months){delete r.months[ym];changed=true}return}
+        const j=(ch.doc.data()||{}).json;
+        if(j!==r.months[ym]){r.months[ym]=j;changed=true}
+      });
+      r.got.ext=true;if(!snap.metadata.fromCache)r.srv.ext=true;
+      if(changed||(r.extDirty&&r.got.ext&&r.got.rcpt))rebuild();
+      meta("ext",snap);checkReady();
+    },onErr));
+    uns.push(fbDb.collection(COL_RCPT).onSnapshot({includeMetadataChanges:true},snap=>{
+      let changed=false;
+      snap.docChanges().forEach(ch=>{
+        const id=ch.doc.id;
+        if(ch.type==="removed"){if(id in r.rcpt){delete r.rcpt[id];changed=true}return}
+        const img=(ch.doc.data()||{}).img;
+        if(img!==r.rcpt[id]){r.rcpt[id]=img;changed=true}
+      });
+      r.got.rcpt=true;if(!snap.metadata.fromCache)r.srv.rcpt=true;
+      if(changed||(r.extDirty&&r.got.ext&&r.got.rcpt))rebuild();
+      meta("rcpt",snap);checkReady();
+    },onErr));
+    const on=()=>up({online:true}),off=()=>up({online:false});
+    window.addEventListener("online",on);window.addEventListener("offline",off);
+    return()=>{uns.forEach(u=>{try{u()}catch(e){}});window.removeEventListener("online",on);window.removeEventListener("offline",off)};
+  },[user]);
+
+  /* 送信（変わったドキュメントだけ） */
+  const flush=useCallback(async()=>{
+    const r=R.current;if(!fbDb||phaseRef.current!=="synced")return;
+    const s=stRef.current;const at=Date.now(),by=devLabel()+" "+((user&&user.email)||"");
+    const ops=[];
+    for(const k of SYNC_KEYS){
+      const j=JSON.stringify(s[k]===undefined?null:s[k]);
+      if(j===r.remote[k])continue;
+      if(k==="horses"&&r.remote.horses){
+        let oldN=0;try{oldN=(JSON.parse(r.remote.horses)||[]).length}catch(e){}
+        const newN=(s.horses||[]).length;
+        if(oldN-newN>=3&&!confirm("馬の登録が "+oldN+" 頭 → "+newN+" 頭 に減ります。\nクラウドのデータもこの内容で上書きしますか？\n\n「キャンセル」でクラウドの内容に戻します。")){
+          try{setters.horses(JSON.parse(r.remote.horses))}catch(e){}
+          continue;
+        }
+      }
+      r.remote[k]=j;
+      ops.push(b=>b.set(fbDb.collection(COL_DATA).doc(k),{json:j,at,by}));
+    }
+    const sp=splitExtras(s.extras);
+    Object.entries(sp.months).forEach(([ym,j])=>{
+      if(j===r.months[ym])return;r.months[ym]=j;
+      ops.push(b=>b.set(fbDb.collection(COL_EXT).doc(ym),{json:j,at,by}));
+    });
+    Object.keys(r.months).forEach(ym=>{
+      if(ym in sp.months)return;delete r.months[ym];
+      ops.push(b=>b.delete(fbDb.collection(COL_EXT).doc(ym)));
+    });
+    const bigFix=[];
+    for(const [id,img] of Object.entries(sp.rcpt)){
+      if(img===r.rcpt[id])continue;
+      if(img.length>MAX_DOC){bigFix.push(id);continue}
+      r.rcpt[id]=img;
+      ops.push(b=>b.set(fbDb.collection(COL_RCPT).doc(id),{img,at,by}));
+    }
+    Object.keys(r.rcpt).forEach(id=>{
+      if(id in sp.rcpt)return;delete r.rcpt[id];
+      ops.push(b=>b.delete(fbDb.collection(COL_RCPT).doc(id)));
+    });
+    /* 大きすぎる領収書写真は縮小してから送る（次回の送信で反映） */
+    if(bigFix.length){
+      for(const id of bigFix){
+        let img=sp.rcpt[id];
+        for(const [px,q] of [[1000,0.6],[800,0.5],[600,0.45]]){if(img.length<=MAX_DOC)break;img=await shrinkImg(img,px,q)}
+        const [ym,eid]=id.split("__");
+        setters.extras(prev=>{const n={...prev};n[ym]=(n[ym]||[]).map(e=>String(e.id)===eid?{...e,receiptImg:img}:e);return n});
+      }
+    }
+    for(let i=0;i<ops.length;i+=20){
+      const b=fbDb.batch();ops.slice(i,i+20).forEach(f=>f(b));
+      b.commit().catch(e=>{console.error(e);phaseRef.current="error";up({phase:"error",error:fbErrMsg(e)})});
+    }
+  },[user]);
+
+  useEffect(()=>{
+    const r=R.current;if(!fbDb||!user||st.phase!=="synced")return;
+    if(r.timer)clearTimeout(r.timer);
+    r.timer=setTimeout(flush,800);
+  },[st.phase,state.horses,state.addrs,state.extras,state.paidFlags,state.invNotes,state.selfCosts,state.selfSales,state.advCosts,state.insurances]);
+
+  /* 1日1回の自動バックアップ（写真を除く・7世代） */
+  useEffect(()=>{
+    const r=R.current;if(!fbDb||st.phase!=="synced"||r.backupDone||!st.lastSync)return;
+    r.backupDone=true;
+    const id=todayStr();const col=fbDb.collection(COL_BK);
+    col.doc(id).get().then(d=>{
+      if(d.exists){up({backupAt:id});return}
+      const s=stRef.current;const sp=splitExtras(s.extras);
+      const body={};SYNC_KEYS.forEach(k=>body[k]=s[k]);
+      body.extras={};Object.entries(sp.months).forEach(([ym,j])=>{try{body.extras[ym]=JSON.parse(j)}catch(e){}});
+      return col.doc(id).set({json:JSON.stringify(body),at:Date.now(),by:devLabel(),n:(s.horses||[]).length}).then(()=>{
+        up({backupAt:id});
+        return col.get().then(q=>{const ids=q.docs.map(x=>x.id).sort().reverse();ids.slice(7).forEach(x=>col.doc(x).delete())});
+      });
+    }).catch(e=>console.warn("backup",e));
+  },[st.phase,st.lastSync]);
+
+  /* 初回アップロード（クラウドが空のときだけ） */
+  const uploadAll=useCallback(()=>{
+    const r=R.current;if(!fbDb||phaseRef.current!=="empty")return;
+    const s=stRef.current;
+    if(!(s.horses||[]).length){alert("この端末に馬のデータがありません。先にバックアップ復元をしてください。");return}
+    if(!confirm("この端末のデータ（馬 "+s.horses.length+" 頭）をクラウドへ初回アップロードします。\n以後はほかの端末もこのデータで同期されます。よろしいですか？"))return;
+    const at=Date.now(),by=devLabel()+" "+((user&&user.email)||"");
+    const ops=[];
+    SYNC_KEYS.forEach(k=>{const j=JSON.stringify(s[k]===undefined?null:s[k]);r.remote[k]=j;ops.push(b=>b.set(fbDb.collection(COL_DATA).doc(k),{json:j,at,by}))});
+    const sp=splitExtras(s.extras);
+    Object.entries(sp.months).forEach(([ym,j])=>{r.months[ym]=j;ops.push(b=>b.set(fbDb.collection(COL_EXT).doc(ym),{json:j,at,by}))});
+    Object.entries(sp.rcpt).forEach(([id,img])=>{if(img.length>MAX_DOC)return;r.rcpt[id]=img;ops.push(b=>b.set(fbDb.collection(COL_RCPT).doc(id),{img,at,by}))});
+    for(let i=0;i<ops.length;i+=20){const b=fbDb.batch();ops.slice(i,i+20).forEach(f=>f(b));b.commit().catch(e=>{phaseRef.current="error";up({phase:"error",error:fbErrMsg(e)})})}
+    setPhase("synced");
+  },[user]);
+
+  const listBackups=useCallback(()=>fbDb?fbDb.collection(COL_BK).get().then(q=>q.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.id.localeCompare(a.id))):Promise.resolve([]),[]);
+  return{...st,uploadAll,listBackups,flushNow:flush};
+}
+
+/* ===== ログイン画面 ===== */
+function LoginScreen(){
+  const[email,setEmail]=useState("");const[pw,setPw]=useState("");const[err,setErr]=useState("");const[busy,setBusy]=useState(false);
+  const login=e=>{
+    e.preventDefault();setErr("");setBusy(true);
+    fbAuth.signInWithEmailAndPassword(email.trim(),pw).catch(x=>{
+      const c=x&&x.code;
+      setErr(c==="auth/network-request-failed"?"ネットワークに接続できません。":c==="auth/too-many-requests"?"試行回数が多すぎます。しばらく待ってから再度お試しください。":"メールアドレスまたはパスワードが違います。");
+    }).finally(()=>setBusy(false));
+  };
+  const reset=()=>{if(!email.trim()){setErr("先にメールアドレスを入力してください。");return}fbAuth.sendPasswordResetEmail(email.trim()).then(()=>setErr("パスワード再設定のメールを送りました。")).catch(()=>setErr("メールを送れませんでした。"))};
+  return(<div style={{minHeight:"100vh",background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <form onSubmit={login} className="bg-white rounded-xl" style={{width:"100%",maxWidth:380,padding:28,border:"1px solid #e5e7eb",boxShadow:"0 4px 16px rgba(0,0,0,.06)"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+        <div style={{width:40,height:40,background:"#0f2f5e",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#f97316",fontWeight:"bold",fontSize:18}}>北</div>
+        <div><h1 style={{fontSize:17,fontWeight:"bold",margin:0}}>北洋牧場 管理システム</h1><p style={{fontSize:11,color:"#6b7280",margin:0}}>カルテと同じアカウントでログイン</p></div>
+      </div>
+      <label className="block text-sm font-medium text-gray-700 mb-1">メールアドレス</label>
+      <input type="email" autoComplete="username" className="w-full border rounded-lg px-3 py-2 text-sm" style={{marginBottom:12}} value={email} onChange={e=>setEmail(e.target.value)}/>
+      <label className="block text-sm font-medium text-gray-700 mb-1">パスワード</label>
+      <input type="password" autoComplete="current-password" className="w-full border rounded-lg px-3 py-2 text-sm" style={{marginBottom:16}} value={pw} onChange={e=>setPw(e.target.value)}/>
+      {err&&<p style={{fontSize:12,color:"#b91c1c",margin:"0 0 12px"}}>{err}</p>}
+      <button type="submit" disabled={busy||!email||!pw} style={{width:"100%",background:(busy||!email||!pw)?"#9ca3af":"#2563eb",color:"#fff",padding:"10px 0",borderRadius:8,fontSize:14,fontWeight:600,border:"none",cursor:"pointer"}}>{busy?"ログイン中…":"ログイン"}</button>
+      <button type="button" onClick={reset} style={{marginTop:12,background:"none",border:"none",color:"#2563eb",fontSize:12,cursor:"pointer"}}>パスワードを忘れた場合</button>
+    </form>
+  </div>);
+}
+
+/* ===== 同期状態の帯（常時表示） ===== */
+function SyncBanner({sync,user,horsesN}){
+  const[open,setOpen]=useState(false);
+  if(!user)return <div style={{background:"#b91c1c",color:"#fff",fontSize:12,padding:"6px 16px"}}>同期なしで開いています（Firebase を読み込めませんでした）。この間の入力はこの端末にだけ保存されます。</div>;
+  const off=!sync.online;
+  const k=sync.phase==="error"?"err":off?"off":sync.phase==="empty"?"empty":sync.phase==="connecting"?"conn":sync.pending?"pend":"ok";
+  const cfg={ok:["#065f46","同期済み"],pend:["#92400e","送信待ち"],off:["#92400e","オフライン"],conn:["#374151","接続中"],empty:["#1d4ed8","クラウド未登録"],err:["#b91c1c","同期エラー"]}[k];
+  return(<div style={{background:cfg[0],color:"#fff",fontSize:12}}>
+    <div style={{maxWidth:1100,margin:"0 auto",padding:"6px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",cursor:"pointer"}} onClick={()=>setOpen(!open)}>
+      <span style={{fontWeight:700,background:"rgba(255,255,255,.22)",borderRadius:4,padding:"1px 7px"}}>{cfg[1]}</span>
+      <span style={{opacity:.9}}>{user.email}</span>
+      <span style={{opacity:.85}}>登録 {horsesN} 頭</span>
+      {sync.lastSync&&<span style={{opacity:.8}}>最終同期 {new Date(sync.lastSync).toLocaleTimeString("ja-JP")}</span>}
+      <span style={{marginLeft:"auto",opacity:.9,textDecoration:"underline",whiteSpace:"nowrap"}}>{open?"閉じる":"詳細"}</span>
+    </div>
+    {(k==="err"||k==="off"||k==="empty")&&<div style={{maxWidth:1100,margin:"0 auto",padding:"0 16px 8px",lineHeight:1.7}}>
+      {k==="err"&&<>{sync.error}<br/>この表示が出ている間の変更はクラウドに届いていません。画面を再読み込みしてください。</>}
+      {k==="off"&&"オフラインです。入力はこの端末に保存され、接続が戻ると自動で送信されます。"}
+      {k==="empty"&&"クラウドにまだ牧場データがありません。ダッシュボードの「クラウド同期」で初回アップロードをしてください。"}
+    </div>}
+    {open&&<div style={{maxWidth:1100,margin:"0 auto",padding:"0 16px 12px",lineHeight:1.8}}>
+      <div>バージョン：{APP_VER}（更新 {APP_BUILD}）／ この端末：{devLabel()}</div>
+      {sync.lastBy&&<div>馬データの最終更新：{sync.lastBy}</div>}
+      {sync.backupAt&&<div>クラウド自動バックアップ：{sync.backupAt}（7日分保持）</div>}
+      <button onClick={e=>{e.stopPropagation();if(confirm("ログアウトしますか？"))fbAuth.signOut()}} style={{marginTop:6,background:"rgba(255,255,255,.2)",color:"#fff",border:"1px solid rgba(255,255,255,.5)",borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer"}}>ログアウト</button>
+    </div>}
+  </div>);
+}
+
+/* ===== 起動（ログイン状態で振り分け） ===== */
+function Root(){
+  const[user,setUser]=useState(undefined);const[local,setLocal]=useState(false);
+  useEffect(()=>{if(!fbAuth){setUser(null);return}return fbAuth.onAuthStateChanged(u=>setUser(u||null))},[]);
+  if(local)return <App user={null}/>;
+  if(!fbAuth)return(<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}><div className="bg-white rounded-xl" style={{maxWidth:420,padding:24,border:"1px solid #e5e7eb",lineHeight:1.8,fontSize:14}}>
+    <b>クラウドに接続できません</b><br/>{FB_ERR}<br/>インターネット接続を確認して再読み込みしてください。
+    <div style={{marginTop:12,display:"flex",gap:8}}><button onClick={()=>location.reload()} style={{background:"#2563eb",color:"#fff",padding:"7px 14px",borderRadius:8,border:"none",fontSize:13}}>再読み込み</button>
+    <button onClick={()=>setLocal(true)} style={{background:"#e5e7eb",padding:"7px 14px",borderRadius:8,border:"none",fontSize:13}}>同期なしで開く</button></div></div></div>);
+  if(user===undefined)return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:"#6b7280",fontSize:14}}>読み込み中…</div>;
+  if(!user)return <LoginScreen/>;
+  return <App user={user}/>;
+}
+
+/* 接続待ちの間は入力できないようにする（接続後にクラウドの内容で置き換わるため） */
+function ConnectOverlay(){
+  const[slow,setSlow]=useState(false);const[hide,setHide]=useState(false);
+  useEffect(()=>{const t=setTimeout(()=>setSlow(true),12000);return()=>clearTimeout(t)},[]);
+  if(hide)return null;
+  return(<div style={{position:"fixed",inset:0,background:"rgba(249,250,251,.92)",zIndex:60,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div style={{textAlign:"center",fontSize:14,color:"#374151",lineHeight:1.8,maxWidth:420}}>
+      <b>クラウドから読み込み中…</b>
+      {slow&&<div style={{fontSize:12,color:"#92400e",marginTop:8}}>時間がかかっています。インターネット接続を確認してください。<br/>
+        <button onClick={()=>setHide(true)} style={{marginTop:8,background:"#fff",border:"1px solid #d1d5db",borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer"}}>この端末の保存データで閲覧する</button>
+        <div style={{fontSize:11,color:"#6b7280",marginTop:6}}>閲覧中に入力した内容は、接続できたときにクラウドの内容で置き換わります。</div></div>}
+    </div></div>);
+}
+
 /* ===== メインアプリ ===== */
-function App(){
+function App({user}){
   const saved=useMemo(()=>loadLS(),[]);
   const[horses,setH]=useState(()=>migrateHorses(saved?.horses||INIT_HORSES));
   const[addrs,setAddrs]=useState(saved?.addrs||INIT_ADDRESSES);
@@ -685,67 +984,18 @@ function App(){
   const[scModal,setScModal]=useState(null); // horseId for cost modal
   const[ssModal,setSsModal]=useState(null); // horseId for sale modal
   const[acModal,setAcModal]=useState(null); // horseId for advance cost modal
-  const[syncUrl,setSyncUrl]=useState(()=>localStorage.getItem("hokuyo_sync_url")||"");
-  const[syncStatus,setSyncStatus]=useState("");
-  const syncTimer=React.useRef(null);
-  const cloudLoaded=React.useRef(false);
+  const[bkList,setBkList]=useState(null);
+  const sync=useFarmSync(
+    {horses,addrs,extras,paidFlags,invNotes,selfCosts,selfSales,advCosts,insurances},
+    {horses:setH,addrs:setAddrs,extras:setExtras,paidFlags:setPaidFlags,invNotes:setInvNotes,selfCosts:setSelfCosts,selfSales:setSelfSales,advCosts:setAdvCosts,insurances:setInsurances},
+    user);
 
-  /* Google Apps Script でクラウド同期（JSONP読込 + fetch書込） */
-  const gasUrl=syncUrl?syncUrl.replace(/\/$/, ""):"";
-
-  /* クラウド保存（fetch mode:no-cors → 送信のみ確認不可） */
-  const cloudSave=useCallback((data)=>{
-    if(!gasUrl)return;
-    setSyncStatus("保存中...");
-    const body=JSON.stringify({...data,_ts:Date.now()});
-    fetch(gasUrl,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain"},body:body})
-    .then(()=>setSyncStatus("同期済 "+new Date().toLocaleTimeString()))
-    .catch(err=>setSyncStatus("同期エラー: "+err.message));
-  },[gasUrl]);
-
-  /* クラウドから読込（JSONP方式 - CORS回避） */
-  const cloudLoad=useCallback(()=>{
-    if(!gasUrl)return Promise.resolve(null);
-    return new Promise((resolve,reject)=>{
-      const cbName="_hokuyo_cb_"+Date.now();
-      const timeout=setTimeout(()=>{delete window[cbName];reject(new Error("タイムアウト"))},10000);
-      window[cbName]=function(data){
-        clearTimeout(timeout);delete window[cbName];
-        try{const s=document.querySelector("script[data-hokuyo-jsonp]");if(s)s.remove()}catch(e){}
-        resolve(data);
-      };
-      const s=document.createElement("script");
-      s.src=gasUrl+"?callback="+cbName;
-      s.setAttribute("data-hokuyo-jsonp","1");
-      s.onerror=function(){clearTimeout(timeout);delete window[cbName];s.remove();reject(new Error("読込失敗"))};
-      document.head.appendChild(s);
-    });
-  },[gasUrl]);
-
-  /* クラウドから読込（起動時） */
-  useEffect(()=>{
-    if(!gasUrl){cloudLoaded.current=true;return}
-    setSyncStatus("読込中...");
-    cloudLoad().then(d=>{
-      if(!d||!d.horses){cloudLoaded.current=true;return setSyncStatus("クラウドにデータなし（正常）")}
-      setH(d.horses);if(d.addrs)setAddrs(d.addrs);if(d.extras)setExtras(d.extras);
-      if(d.paidFlags)setPaidFlags(d.paidFlags);if(d.invNotes)setInvNotes(d.invNotes);
-      if(d.selfCosts)setSelfCosts(d.selfCosts);if(d.selfSales)setSelfSales(d.selfSales);if(d.advCosts)setAdvCosts(d.advCosts);if(d.insurances)setInsurances(d.insurances);
-      setSyncStatus("クラウドから復元済 "+new Date().toLocaleTimeString());
-      cloudLoaded.current=true;
-    }).catch(e=>{cloudLoaded.current=true;setSyncStatus("読込エラー: "+e.message)});
-  },[]);
-
-  /* 自動保存（ローカル＋クラウド） */
+  /* 自動保存（この端末のキャッシュ。クラウドへの送信は useFarmSync が担当） */
   useEffect(()=>{
     const data={horses,addrs,extras,paidFlags,invNotes,selfCosts,selfSales,advCosts,insurances};
     const ok=saveLS(data);
     setSaveErr(ok?null:LS_LAST_ERR);
-    if(gasUrl&&cloudLoaded.current){if(syncTimer.current)clearTimeout(syncTimer.current);syncTimer.current=setTimeout(()=>cloudSave(data),3000)}
   },[horses,addrs,extras,paidFlags,invNotes,selfCosts,selfSales,advCosts,insurances]);
-
-  /* 同期URL保存 */
-  useEffect(()=>{localStorage.setItem("hokuyo_sync_url",syncUrl)},[syncUrl]);
 
   const owners=useMemo(()=>[...new Set(horses.map(h=>h.owner))].sort(),[horses]);
   const nid=useMemo(()=>Math.max(0,...horses.map(h=>h.id))+1,[horses]);
@@ -816,7 +1066,8 @@ function App(){
         :"ブラウザの保存機能が使えない状態です。プライベートブラウズで開いていないか確認してください。"}
       <br/>この表示が出ている間に入力した内容は、閉じると失われます。
     </div>}
-    <StorageBanner/>
+    <SyncBanner sync={sync} user={user} horsesN={horses.length}/>
+    {user&&sync.phase==="connecting"&&<ConnectOverlay/>}
     <header className="bg-white" style={{borderBottom:"1px solid #e5e7eb",boxShadow:"0 1px 2px rgba(0,0,0,.05)"}}>
       <div style={{maxWidth:1100,margin:"0 auto",padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -881,7 +1132,7 @@ function App(){
         </div>})()}
         <div className="bg-white rounded-xl p-6" style={{border:"1px solid #e5e7eb",marginTop:16}}>
           <h2 style={{fontSize:16,fontWeight:"bold",marginBottom:12}}>データ管理</h2>
-          <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>データはこのブラウザに自動保存されます。端末を変える場合はバックアップ・復元をご利用ください。</p>
+          <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>データはクラウドに自動保存されます。念のため、月末などにバックアップ（JSON）も保存しておくと安心です。</p>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button style={{background:"#2563eb",color:"#fff",padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:600,border:"none",cursor:"pointer"}} onClick={()=>{
               const data=JSON.stringify({horses,addrs,extras,paidFlags,invNotes,selfCosts,selfSales,advCosts,insurances},null,2);
@@ -892,56 +1143,50 @@ function App(){
               const inp=document.createElement("input");inp.type="file";inp.accept=".json";
               inp.onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{
                 const d=JSON.parse(ev.target.result);
+                if(user&&!confirm("バックアップの内容（馬 "+((d.horses||[]).length)+" 頭）で今のデータを置き換えます。\nクラウドにも反映され、ほかの端末もこの内容になります。よろしいですか？"))return;
                 if(d.horses){setH(d.horses)}if(d.addrs){setAddrs(d.addrs)}if(d.extras){setExtras(d.extras)}if(d.paidFlags){setPaidFlags(d.paidFlags)}if(d.invNotes){setInvNotes(d.invNotes)}if(d.selfCosts){setSelfCosts(d.selfCosts)}if(d.selfSales){setSelfSales(d.selfSales)}if(d.advCosts){setAdvCosts(d.advCosts)}if(d.insurances){setInsurances(d.insurances)}
                 alert("データを復元しました（"+((d.horses||[]).length)+"頭）");
               }catch(err){alert("ファイル読込エラー")}};r.readAsText(f)};inp.click();
             }}>バックアップ復元</button>
-            <button style={{background:"#dc2626",color:"#fff",padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:600,border:"none",cursor:"pointer"}} onClick={()=>{
-              if(confirm("全データを初期状態に戻しますか？この操作は元に戻せません。")){localStorage.removeItem(LS_KEY);setH(INIT_HORSES);setAddrs(INIT_ADDRESSES);setExtras({});setPaidFlags({});setInvNotes({});setSelfCosts({});setSelfSales({});setAdvCosts({});setInsurances([]);alert("初期化しました")}
-            }}>データ初期化</button>
+            <button style={{background:"#e5e7eb",color:"#374151",padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:600,border:"none",cursor:"pointer"}} onClick={()=>{
+              if(confirm("この端末に保存している牧場データを消して、画面を読み込み直します。\n（クラウドのデータは消えません。ログイン後にクラウドから読み込み直します）")){try{localStorage.removeItem(LS_KEY);localStorage.removeItem(HOME_KEY)}catch(e){}location.reload()}
+            }}>この端末の保存データを消去</button>
           </div>
         </div>
-        {/* クラウド同期 */}
-        <div className="bg-white rounded-xl p-6" style={{border:"1px solid #e5e7eb",marginTop:16}}>
+        {/* クラウド同期（Firebase） */}
+        {user&&<div className="bg-white rounded-xl p-6" style={{border:"1px solid #e5e7eb",marginTop:16}}>
           <h2 style={{fontSize:16,fontWeight:"bold",marginBottom:8}}>クラウド同期</h2>
-          <p style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Google Apps Script でデータをクラウドに保存し、他のパソコンと同期できます。</p>
-          <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-            <input className="flex-1 border rounded-lg px-3 py-2 text-sm" style={{minWidth:200}} placeholder="Apps Script デプロイURL（https://script.google.com/macros/s/.../exec）" value={syncUrl} onChange={e=>setSyncUrl(e.target.value.trim())}/>
-          </div>
-          <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
-            {syncUrl&&<button style={{background:"#059669",color:"#fff",padding:"8px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer",whiteSpace:"nowrap"}} onClick={()=>cloudSave({horses,addrs,extras,paidFlags,invNotes,selfCosts,selfSales,advCosts,insurances})}>今すぐ保存</button>}
-            {syncUrl&&<button style={{background:"#f59e0b",color:"#fff",padding:"8px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer",whiteSpace:"nowrap"}} onClick={()=>{
-              setSyncStatus("読込中...");
-              cloudLoad().then(d=>{
-                if(d&&d.horses){setH(d.horses);if(d.addrs)setAddrs(d.addrs);if(d.extras)setExtras(d.extras);if(d.paidFlags)setPaidFlags(d.paidFlags);if(d.invNotes)setInvNotes(d.invNotes);if(d.selfCosts)setSelfCosts(d.selfCosts);if(d.selfSales)setSelfSales(d.selfSales);if(d.advCosts)setAdvCosts(d.advCosts);if(d.insurances)setInsurances(d.insurances);setSyncStatus("クラウドから復元済")}
-                else setSyncStatus("クラウドにデータなし");
-              }).catch(e=>setSyncStatus("読込エラー: "+e.message));
-            }}>クラウドから復元</button>}
-            {syncUrl&&<button style={{background:"#6b7280",color:"#fff",padding:"8px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer",whiteSpace:"nowrap"}} onClick={()=>{
-              setSyncStatus("接続テスト中...");
-              cloudLoad().then(d=>{
-                if(d)setSyncStatus("接続OK！"+(d._ts?"最終更新: "+new Date(d._ts).toLocaleString():"データあり"));
-                else setSyncStatus("接続OK（データなし）");
-              }).catch(e=>setSyncStatus("接続失敗: "+e.message));
-            }}>接続テスト</button>}
-            {syncUrl&&<button style={{background:"#dc2626",color:"#fff",padding:"8px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer",whiteSpace:"nowrap"}} onClick={()=>{if(confirm("同期URLをリセットしますか？")){setSyncUrl("");setSyncStatus("")}}}>リセット</button>}
-          </div>
-          {syncStatus&&<div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:syncStatus.includes("エラー")?"#dc2626":syncStatus.includes("中")?"#f59e0b":"#22c55e"}}/>
-            <span style={{fontSize:12,color:"#6b7280"}}>{syncStatus}</span>
+          <p style={{fontSize:12,color:"#6b7280",marginBottom:10}}>データは Firebase（カルテと同じアカウント）に保存され、自宅Mac・事務所Mac・iPad で自動的に同期されます。</p>
+          {sync.phase==="empty"&&<div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:12,marginBottom:10,fontSize:13,lineHeight:1.7}}>
+            <b>クラウドにまだ牧場データがありません。</b><br/>最新のデータが入っているこの端末から、1回だけ初回アップロードをしてください（この端末：馬 {horses.length} 頭）。
+            <div style={{marginTop:8}}><button style={{background:"#2563eb",color:"#fff",padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:600,border:"none",cursor:"pointer"}} onClick={sync.uploadAll}>クラウドへ初回アップロード</button></div>
           </div>}
-          {!syncUrl&&<div style={{background:"#f0f4ff",border:"1px solid #bfdbfe",borderRadius:8,padding:12,marginTop:8}}>
-            <p style={{fontSize:12,color:"#1e40af",fontWeight:600,margin:"0 0 6px"}}>設定方法：</p>
-            <ol style={{fontSize:11,color:"#374151",margin:0,paddingLeft:16,lineHeight:1.8}}>
-              <li>Googleドライブで新しいスプレッドシートを作成</li>
-              <li>メニュー「拡張機能」→「Apps Script」を開く</li>
-              <li>指定コードを貼り付けて保存</li>
-              <li>「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、アクセス「全員」</li>
-              <li>表示されたURLを上の入力欄に貼り付け</li>
-            </ol>
-            <p style={{fontSize:11,color:"#6b7280",margin:"6px 0 0"}}>他のパソコンでも同じURLを入力すると同期されます。</p>
+          <div style={{fontSize:12,color:"#374151",lineHeight:1.9}}>
+            <div>状態：{sync.phase==="synced"?(sync.pending?"送信待ちあり":"同期済み"):sync.phase==="empty"?"クラウド未登録":sync.phase==="error"?"エラー："+sync.error:"接続中"}{!sync.online&&"（オフライン）"}</div>
+            {sync.lastSync&&<div>最終同期：{new Date(sync.lastSync).toLocaleString("ja-JP")}</div>}
+            {sync.backupAt&&<div>クラウド自動バックアップ：{sync.backupAt}（1日1回・7日分保持）</div>}
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
+            <button style={{background:"#6b7280",color:"#fff",padding:"7px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer"}} onClick={()=>{
+              sync.listBackups().then(list=>setBkList(list)).catch(e=>alert("取得できませんでした："+e.message));
+            }}>クラウドのバックアップ一覧</button>
+            <button style={{background:"#e5e7eb",color:"#374151",padding:"7px 14px",borderRadius:8,fontSize:12,fontWeight:600,border:"none",cursor:"pointer"}} onClick={()=>{if(confirm("ログアウトしますか？"))fbAuth.signOut()}}>ログアウト</button>
+          </div>
+          {bkList&&<div style={{marginTop:10,border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
+            {bkList.length===0&&<p style={{fontSize:12,color:"#9ca3af",padding:10,margin:0}}>バックアップはまだありません。</p>}
+            {bkList.map(b=><div key={b.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 10px",borderTop:"1px solid #f3f4f6",fontSize:12}}>
+              <span>{b.id}　馬 {b.n} 頭　{b.by||""}</span>
+              <button style={{fontSize:11,color:"#b45309",background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:6,padding:"3px 10px",cursor:"pointer"}} onClick={()=>{
+                if(!confirm(b.id+" のバックアップに戻します。\n今のデータはこの内容で置き換わり、ほかの端末にも反映されます。\n（領収書写真は現在のものが残ります）よろしいですか？"))return;
+                try{const d=JSON.parse(b.json);
+                  const keepImg=ex=>{const n={};Object.entries(ex||{}).forEach(([ym,arr])=>{const cur=extras[ym]||[];n[ym]=(arr||[]).map(e=>{const c=cur.find(x=>x.id===e.id);return c&&c.receiptImg?{...e,receiptImg:c.receiptImg}:e})});return n};
+                  if(d.horses)setH(d.horses);if(d.addrs)setAddrs(d.addrs);if(d.extras)setExtras(keepImg(d.extras));if(d.paidFlags)setPaidFlags(d.paidFlags);if(d.invNotes)setInvNotes(d.invNotes);if(d.selfCosts)setSelfCosts(d.selfCosts);if(d.selfSales)setSelfSales(d.selfSales);if(d.advCosts)setAdvCosts(d.advCosts);if(d.insurances)setInsurances(d.insurances);
+                  setBkList(null);alert("戻しました（"+((d.horses||[]).length)+"頭）");
+                }catch(e){alert("読み込めませんでした")}
+              }}>この日に戻す</button>
+            </div>)}
           </div>}
-        </div>
+        </div>}
       </div>}
 
       {/* ===== 馬管理 ===== */}
@@ -1946,7 +2191,7 @@ function App(){
   </div>);
 }
 
-ReactDOM.render(<App/>,document.getElementById("root"));
+ReactDOM.render(<Root/>,document.getElementById("root"));
 </script>
 </body>
 </html>
