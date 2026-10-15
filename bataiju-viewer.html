@@ -360,16 +360,22 @@ function medianCurve(key, mMax){
 
 function viewGrowth(el){
   const mMax=24;
+  const showThin = document.getElementById("ckThin")?.checked !== false;
+  const focusName = document.getElementById("focusSel")?.value || "";
   const thin=[], series=[];
   visibleCohorts().forEach(c=>{
     const col=css(c.v);
-    H.filter(h=>h.cohort===c.key).forEach(h=>{
-      thin.push({pts:h.P.map(p=>[p.m,p.w]), color:col});
+    if(showThin) H.filter(h=>h.cohort===c.key).forEach(h=>{
+      if(h.name===focusName) return;
+      thin.push({pts:h.P.map(p=>[p.m,p.w]), color:col, opacity:0.16});
     });
     const mc=medianCurve(c.key,mMax);
-    if(mc.length) series.push({pts:mc, color:col, width:2.5, label:c.key});
+    if(mc.length) series.push({pts:mc, color:col, width:3, label:c.key+"年 中央値"});
   });
-  const all=[].concat(...thin.map(t=>t.pts.map(p=>p[1])));
+  const fh = focusName ? H.find(h=>h.name===focusName) : null;
+  if(fh){ const c=cohortOf(fh.cohort);
+    series.push({pts:fh.P.map(p=>[p.m,p.w]), color:css((c&&c.v)||"--text-primary"), width:3.5, dots:true, label:fh.name}); }
+  const all=[].concat(...thin.map(t=>t.pts.map(p=>p[1])), ...series.map(t=>t.pts.map(p=>p[1])));
   const yMax=Math.ceil((Math.max(...all,100)+20)/50)*50;
   lineChart(el, {
     h:400, xDom:[0,mMax], yDom:[0,yMax],
@@ -457,21 +463,24 @@ function viewDG(el){
   });
 }
 
+let SEASON_RANGE=["",""];
 function seasonData(){
-  const bins=Array.from({length:12},()=>[]);
+  const bins=Array.from({length:12},()=>[]); let lo="",hi="";
   H.forEach(h=>{
     for(let i=0;i<h.P.length-1;i++){
       const a=h.P[i],c=h.P[i+1], dt=c.t-a.t; if(dt<=0||dt>45) continue;
       const dg=(c.w-a.w)/dt, mid=(a.m+c.m)/2, exp=stdDG(mid); if(exp<=0) continue;
       const mday=(d2n(a.d)+d2n(c.d))/2, mo=new Date(mday*86400000).getUTCMonth();
       bins[mo].push(dg/exp*100);
+      if(!lo||a.d<lo) lo=a.d; if(!hi||c.d>hi) hi=c.d;
     }
   });
+  SEASON_RANGE=[lo,hi];
   return bins.map(b=>b.length?{v:median(b), n:b.length}:{v:null,n:0});
 }
 function viewSeason(el){
   const data=seasonData();
-  const W=860,Hh=340,P={l:50,r:16,t:34,b:40};
+  const W=860,Hh=352,P={l:50,r:16,t:34,b:52};
   const vals=data.filter(d=>d.v!=null).map(d=>d.v);
   const top=Math.max(140, Math.ceil(Math.max(...vals,100)/20)*20);
   const sy=v=>Hh-P.b-(v/top)*(Hh-P.t-P.b);
@@ -489,12 +498,17 @@ function viewSeason(el){
       s+=`<text x="${(x+w/2).toFixed(1)}" y="${(y-6).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="600" fill="${css("--text-primary")}" style="font-variant-numeric:tabular-nums">${Math.round(d.v)}</text>`;
     }
     s+=`<text x="${(x+w/2).toFixed(1)}" y="${Hh-P.b+17}" text-anchor="middle" font-size="11" fill="${css("--muted")}">${MONTHS[i]}</text>`;
+    s+=`<text x="${(x+w/2).toFixed(1)}" y="${Hh-P.b+30}" text-anchor="middle" font-size="9.5" fill="${css("--muted")}">${d.n?d.n+"件":""}</text>`;
   });
   s+=`<line x1="${P.l}" y1="${Hh-P.b}" x2="${W-P.r}" y2="${Hh-P.b}" stroke="${css("--axis")}"/>`;
   s+=`<text x="${P.l-42}" y="${P.t-12}" font-size="11" fill="${css("--muted")}">達成率</text></svg>`;
   el.innerHTML=`<div class="chartbox">${s}</div>`;
   const worst=data.map((d,i)=>({...d,i})).filter(d=>d.v!=null).sort((a,b)=>a.v-b.v).slice(0,3);
   const best =data.map((d,i)=>({...d,i})).filter(d=>d.v!=null).sort((a,b)=>b.v-a.v).slice(0,3);
+  const tot=data.reduce((a,b)=>a+b.n,0);
+  el.insertAdjacentHTML("afterbegin",
+    `<p class="note">対象：${SEASON_RANGE[0]?jpY(SEASON_RANGE[0]):"—"} 〜 ${SEASON_RANGE[1]?jpY(SEASON_RANGE[1]):"—"}　
+     全産駒の測定間隔 ${tot} 区間（各月の棒の下が件数）</p>`);
   el.insertAdjacentHTML("beforeend",
     `<div class="insight">飼料標準から期待される増体を100%としたとき、実測がその何%だったかを暦月ごとに見ています（月齢の違いは補正済み）。
      伸びにくい月は <b>${worst.map(d=>MONTHS[d.i]+" "+Math.round(d.v)+"%").join("・")}</b>、
@@ -503,19 +517,41 @@ function viewSeason(el){
 
 function viewTable(el){
   const months=[0,1,2,3,4,5,6,7,8,9,10,11,12,15,18,21,24];
-  let s=`<div class="scroll"><table><thead><tr><th>馬名</th><th>産駒年</th><th>生年月日</th>`+
-    months.map(m=>`<th class="num">${m}ヶ月</th>`).join("")+`</tr></thead><tbody>`;
+  let s=`<div class="scroll"><table><thead><tr>`+
+    `<th>馬名</th><th>産駒年</th><th>生年月日</th><th class="num">月齢</th>`+
+    `<th class="num">最終測定日</th><th class="num">最終体重</th><th class="num">直近kg/日</th><th class="num">測定回数</th><th>状態</th>`+
+    `</tr></thead><tbody>`;
+  let newest=""; H.forEach(h=>{const d=h.P[h.P.length-1].d; if(d>newest) newest=d;});
   COH.forEach(c=>{
     H.filter(h=>h.cohort===c.key).forEach(h=>{
-      s+=`<tr><td>${esc(h.name)}</td><td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td><td class="num">${jpY(h.birth)}</td>`;
-      months.forEach(m=>{ const v=at(h.P,m); s+=`<td class="num">${v==null?"":Math.round(v)}</td>`; });
-      s+=`</tr>`;
+      const last=h.P[h.P.length-1], n=h.P.length;
+      let dg=""; if(n>=2){ const a=h.P[n-2]; if(last.t>a.t) dg=((last.w-a.w)/(last.t-a.t)).toFixed(2); }
+      const weaned=(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="離乳");
+      const left  =(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="退厩");
+      const stale =(d2n(newest)-d2n(last.d))>60;
+      const st = left?"退厩" : weaned?"離乳済" : stale?"測定が古い" : "";
+      s+=`<tr${left?' style="opacity:.55"':''}><td>${esc(h.name)}</td>`+
+         `<td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td>`+
+         `<td class="num">${jpY(h.birth)}</td><td class="num">${last.m.toFixed(1)}</td>`+
+         `<td class="num">${jpY(last.d)}</td><td class="num"><b>${last.w}</b></td>`+
+         `<td class="num">${dg}</td><td class="num">${n}</td><td>${st}</td></tr>`;
     });
   });
   s+=`</tbody></table></div>`;
-  el.innerHTML=s;
+  let g=`<div class="scroll"><table><thead><tr><th>馬名</th><th>産駒年</th>`+
+    months.map(m=>`<th class="num">${m}ヶ月</th>`).join("")+`</tr></thead><tbody>`;
+  COH.forEach(c=>{
+    H.filter(h=>h.cohort===c.key).forEach(h=>{
+      g+=`<tr><td>${esc(h.name)}</td><td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td>`;
+      months.forEach(m=>{ const v=at(h.P,m); g+=`<td class="num">${v==null?"":Math.round(v)}</td>`; });
+      g+=`</tr>`;
+    });
+  });
+  g+=`</tbody></table></div>`;
+  el.innerHTML = s + `<h2 style="font-size:15px;margin:18px 0 2px">月齢別の体重（補間値）</h2>`+
+    `<p class="note">測定日は馬ごとにばらばらなので、前後の測定値から月齢に揃え直した値です。`+
+    `<b>空欄はその月齢が測定の範囲外</b>（まだ測っていない／もう測っていない）という意味で、体重が無いわけではありません。</p>` + g;
 }
-
 function viewEvents(el){
   const ev=(DATA.events||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
   if(!ev.length){ el.innerHTML=`<p class="note">出来事シートを取り込むと、ここに一覧が出ます。</p>`; return; }
@@ -559,12 +595,21 @@ function tiles(){
 /* ---------- tabs ---------- */
 const TABS=[
   {id:"growth", label:"成長曲線",   build:body=>{
+      const names=H.slice().sort((a,b)=>a.cohort<b.cohort?1:a.cohort>b.cohort?-1:(a.name<b.name?-1:1));
       body.innerHTML=`<div class="card"><h2>月齢ごとの体重</h2>
-        <p class="note">細い線が1頭ずつ、太い線がその産駒年の中央値です。産駒年をまたいで同じ月齢で比べられます。</p>
-        <div class="controls" id="cohFilter"></div><div id="c1"></div>
-        <div class="legend" id="lg1"></div></div>`;
-      cohortFilter(document.getElementById("cohFilter"), ()=>{ viewGrowth(document.getElementById("c1")); legend(document.getElementById("lg1")); });
-      viewGrowth(document.getElementById("c1")); legend(document.getElementById("lg1"));
+        <p class="note">太い線が産駒年ごとの中央値です。細い線は1頭ずつ。1頭を選ぶとその馬だけ濃く描きます。</p>
+        <div class="controls" id="cohFilter"></div>
+        <div class="controls">
+          <label class="chk"><input type="checkbox" id="ckThin" checked>1頭ずつの線も描く</label>
+          <label>注目する馬 <select id="focusSel"><option value="">（なし）</option>${
+            names.map(h=>`<option value="${esc(h.name)}">${esc(h.name)}</option>`).join("")}</select></label>
+        </div>
+        <div id="c1"></div><div class="legend" id="lg1"></div></div>`;
+      const redraw=()=>{ viewGrowth(document.getElementById("c1")); legend(document.getElementById("lg1")); };
+      cohortFilter(document.getElementById("cohFilter"), redraw);
+      document.getElementById("ckThin").addEventListener("change",redraw);
+      document.getElementById("focusSel").addEventListener("change",redraw);
+      redraw();
     }},
   {id:"dam", label:"母馬系統",  build:body=>{
       const opts=DAMS;
@@ -591,8 +636,8 @@ const TABS=[
       viewSeason(document.getElementById("c4"));
     }},
   {id:"table", label:"一覧表", build:body=>{
-      body.innerHTML=`<div class="card"><h2>月齢体重一覧</h2>
-        <p class="note">グラフと同じ数値を表にしたものです。空欄はその月齢の測定範囲外です。</p><div id="c5"></div></div>
+      body.innerHTML=`<div class="card"><h2>最新の状況</h2>
+        <p class="note">1頭ごとの最後の測定です。下に月齢別の表も付けています。</p><div id="c5"></div></div>
         <div class="card"><h2>出来事</h2><div id="c6"></div></div>`;
       viewTable(document.getElementById("c5")); viewEvents(document.getElementById("c6"));
     }},
