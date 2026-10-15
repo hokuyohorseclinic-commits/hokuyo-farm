@@ -237,6 +237,15 @@ const jp   = s => { const p=String(s).split("-"); return (+p[1])+"/"+(+p[2]); };
 const jpY  = s => { const p=String(s).split("-"); return p[0]+"/"+(+p[1])+"/"+(+p[2]); };
 
 let H = [], DAMS = [];
+function dedupeHorses(list){
+  const best={};
+  list.forEach(h=>{
+    const k=(h.name||"").trim(); if(!k) return;
+    const cur=best[k];
+    if(!cur || (h.pts||[]).length > (cur.pts||[]).length) best[k]=h;
+  });
+  return Object.keys(best).map(k=>best[k]);
+}
 function stem(n){ return String(n).replace(/\s*20\d\d\s*$/, "").trim(); }
 function deriveDams(hs){
   if(DATA.dams && DATA.dams.length) return DATA.dams.filter(d=>d.foals.filter(n=>hs.some(h=>h.name===n)).length>=2);
@@ -252,6 +261,10 @@ function deriveDams(hs){
     .map(k=>({dam:k, foals:g[k].sort()}));
 }
 function prep(){
+  if(DATA.horses && DATA.horses.length){
+    const u=dedupeHorses(DATA.horses);
+    if(u.length!==DATA.horses.length){ DATA.horses=u; persist(); }
+  }
   H = DATA.horses.map(h=>{
     const b = d2n(h.birth);
     const P = h.pts.map(p=>({d:p[0], t:d2n(p[0])-b, m:(d2n(p[0])-b)/DPM, w:+p[1]}))
@@ -515,42 +528,73 @@ function viewSeason(el){
      伸びる月は <b>${best.map(d=>MONTHS[d.i]+" "+Math.round(d.v)+"%").join("・")}</b>。</div>`);
 }
 
+let TBL={coh:"", key:"cohort", dir:1};
+function tableRows(){
+  let newest=""; H.forEach(h=>{const d=h.P[h.P.length-1].d; if(d>newest) newest=d;});
+  let rows = H.map(h=>{
+    const n=h.P.length, last=h.P[n-1];
+    let dg=null; if(n>=2){ const a=h.P[n-2]; if(last.t>a.t) dg=(last.w-a.w)/(last.t-a.t); }
+    const weaned=(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="離乳");
+    const left  =(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="退厩");
+    const stale =(d2n(newest)-d2n(last.d))>60;
+    return {h, n, last, dg, left,
+      st: left?"退厩" : weaned?"離乳済" : stale?"測定が古い" : ""};
+  });
+  if(TBL.coh) rows = rows.filter(r=>r.h.cohort===TBL.coh);
+  const get = r => ({
+    name:r.h.name, cohort:r.h.cohort+"/"+r.h.birth, birth:r.h.birth,
+    age:r.last.m, lastd:r.last.d, lastw:r.last.w,
+    dg:(r.dg==null?-999:r.dg), cnt:r.n, st:r.st
+  })[TBL.key];
+  rows.sort((a,b)=>{ const x=get(a), y=get(b);
+    if(x===y) return a.h.name<b.h.name?-1:1;
+    return (x<y?-1:1)*TBL.dir; });
+  return rows;
+}
 function viewTable(el){
   const months=[0,1,2,3,4,5,6,7,8,9,10,11,12,15,18,21,24];
-  let s=`<div class="scroll"><table><thead><tr>`+
-    `<th>馬名</th><th>産駒年</th><th>生年月日</th><th class="num">月齢</th>`+
-    `<th class="num">最終測定日</th><th class="num">最終体重</th><th class="num">直近kg/日</th><th class="num">測定回数</th><th>状態</th>`+
-    `</tr></thead><tbody>`;
-  let newest=""; H.forEach(h=>{const d=h.P[h.P.length-1].d; if(d>newest) newest=d;});
-  COH.forEach(c=>{
-    H.filter(h=>h.cohort===c.key).forEach(h=>{
-      const last=h.P[h.P.length-1], n=h.P.length;
-      let dg=""; if(n>=2){ const a=h.P[n-2]; if(last.t>a.t) dg=((last.w-a.w)/(last.t-a.t)).toFixed(2); }
-      const weaned=(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="離乳");
-      const left  =(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="退厩");
-      const stale =(d2n(newest)-d2n(last.d))>60;
-      const st = left?"退厩" : weaned?"離乳済" : stale?"測定が古い" : "";
-      s+=`<tr${left?' style="opacity:.55"':''}><td>${esc(h.name)}</td>`+
-         `<td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td>`+
-         `<td class="num">${jpY(h.birth)}</td><td class="num">${last.m.toFixed(1)}</td>`+
-         `<td class="num">${jpY(last.d)}</td><td class="num"><b>${last.w}</b></td>`+
-         `<td class="num">${dg}</td><td class="num">${n}</td><td>${st}</td></tr>`;
-    });
+  const rows = tableRows();
+  const arrow = k => TBL.key===k ? (TBL.dir>0?" ▲":" ▼") : "";
+  const COLS=[["name","馬名",0],["cohort","産駒年",0],["birth","生年月日",1],["age","月齢",1],
+              ["lastd","最終測定日",1],["lastw","最終体重",1],["dg","直近kg/日",1],["cnt","測定回数",1],["st","状態",0]];
+  let s=`<div class="controls">
+    <label>産駒年 <select id="tCoh">
+      <option value="">全体（${H.length}頭）</option>
+      ${COH.map(c=>`<option value="${c.key}"${TBL.coh===c.key?" selected":""}>${c.label}（${H.filter(h=>h.cohort===c.key).length}頭）</option>`).join("")}
+    </select></label>
+    <span style="font-size:12.5px;color:var(--text-secondary)">見出しをクリックすると並べ替わります</span>
+  </div>`;
+  s+=`<div class="scroll"><table><thead><tr>`+
+     COLS.map(c=>`<th class="${c[2]?"num":""}" data-k="${c[0]}" style="cursor:pointer;user-select:none">${c[1]}${arrow(c[0])}</th>`).join("")+
+     `</tr></thead><tbody>`;
+  rows.forEach(r=>{
+    const c=cohortOf(r.h.cohort)||{v:"--muted"};
+    s+=`<tr${r.left?' style="opacity:.55"':''}><td>${esc(r.h.name)}</td>`+
+       `<td><span class="swatch" style="background:${css(c.v)}"></span> ${r.h.cohort}</td>`+
+       `<td class="num">${jpY(r.h.birth)}</td><td class="num">${r.last.m.toFixed(1)}</td>`+
+       `<td class="num">${jpY(r.last.d)}</td><td class="num"><b>${r.last.w}</b></td>`+
+       `<td class="num">${r.dg==null?"":r.dg.toFixed(2)}</td><td class="num">${r.n}</td><td>${r.st}</td></tr>`;
   });
   s+=`</tbody></table></div>`;
   let g=`<div class="scroll"><table><thead><tr><th>馬名</th><th>産駒年</th>`+
     months.map(m=>`<th class="num">${m}ヶ月</th>`).join("")+`</tr></thead><tbody>`;
-  COH.forEach(c=>{
-    H.filter(h=>h.cohort===c.key).forEach(h=>{
-      g+=`<tr><td>${esc(h.name)}</td><td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td>`;
-      months.forEach(m=>{ const v=at(h.P,m); g+=`<td class="num">${v==null?"":Math.round(v)}</td>`; });
-      g+=`</tr>`;
-    });
+  rows.forEach(r=>{
+    const c=cohortOf(r.h.cohort)||{v:"--muted"};
+    g+=`<tr><td>${esc(r.h.name)}</td><td><span class="swatch" style="background:${css(c.v)}"></span> ${r.h.cohort}</td>`;
+    months.forEach(m=>{ const v=at(r.h.P,m); g+=`<td class="num">${v==null?"":Math.round(v)}</td>`; });
+    g+=`</tr>`;
   });
   g+=`</tbody></table></div>`;
   el.innerHTML = s + `<h2 style="font-size:15px;margin:18px 0 2px">月齢別の体重（補間値）</h2>`+
     `<p class="note">測定日は馬ごとにばらばらなので、前後の測定値から月齢に揃え直した値です。`+
-    `<b>空欄はその月齢が測定の範囲外</b>（まだ測っていない／もう測っていない）という意味で、体重が無いわけではありません。</p>` + g;
+    `<b>空欄はその月齢が測定の範囲外</b>（まだ測っていない／もう測っていない）という意味で、体重が無いわけではありません。`+
+    `上の表と同じ並び順・同じ絞り込みです。</p>` + g;
+  el.querySelector("#tCoh").addEventListener("change",e=>{ TBL.coh=e.target.value; viewTable(el); });
+  el.querySelectorAll("th[data-k]").forEach(th=>th.addEventListener("click",()=>{
+    const k=th.dataset.k;
+    if(TBL.key===k) TBL.dir=-TBL.dir; else { TBL.key=k; TBL.dir=1; }
+    viewTable(el);
+  }));
 }
 function viewEvents(el){
   const ev=(DATA.events||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
@@ -759,8 +803,11 @@ function handlePaste(txt){
     n.cohort = old?old.cohort : (n.name.match(/(20\d\d)\s*$/)?n.name.match(/(20\d\d)\s*$/)[1]:String(new Date(n.birth).getFullYear()));
     n.dam = old?old.dam:"";
   });
-  DATA.horses=hs; persist(); renderAll();
-  st.className="status ok"; st.textContent=hs.length+"頭を取り込みました。";
+  const uniq=dedupeHorses(hs);
+  DATA.horses=uniq; persist(); renderAll();
+  const dup=hs.length-uniq.length;
+  st.className="status ok";
+  st.textContent=uniq.length+"頭を取り込みました。"+(dup>0?"（同じ馬の重複 "+dup+"件は、測定回数が多いほうを残しました）":"");
 }
 
 /* ---------- boot ---------- */
@@ -778,9 +825,16 @@ document.getElementById("btnUpdate").addEventListener("click",()=>{ document.get
   document.getElementById("pasteStatus").textContent="体重入力・出来事のどちらでも自動で判別します。"; dlg.showModal(); });
 document.getElementById("btnClose").addEventListener("click",()=>dlg.close());
 document.getElementById("btnApply").addEventListener("click",()=>handlePaste(document.getElementById("pasteArea").value));
-document.getElementById("btnReset").addEventListener("click",()=>{
+document.getElementById("btnReset").addEventListener("click",async()=>{
+  const st=document.getElementById("pasteStatus");
+  if(ENC){
+    let pw=null; try{ pw=localStorage.getItem(PWKEY); }catch(e){}
+    if(pw){ try{ DATA=await decryptWith(pw); persist(); renderAll();
+      st.className="status ok"; st.textContent="このページに入っているデータに戻しました。"; return; }catch(e){} }
+    st.className="status ng"; st.textContent="ページを再読み込みしてください。"; return;
+  }
   DATA=JSON.parse(JSON.stringify(SNAPSHOT)); persist(); renderAll();
-  const st=document.getElementById("pasteStatus"); st.className="status ok"; st.textContent="初期データに戻しました。";
+  st.className="status ok"; st.textContent="初期データに戻しました。";
 });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change",renderAll);
 
