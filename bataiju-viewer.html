@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>北洋牧場 馬体重ビューア</title>
+<style>
+:root{
+  color-scheme: light;
+  --surface-1:#fcfcfb; --plane:#f9f9f7;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  --div-pos:#2a78d6; --div-neg:#e34948; --div-mid:#f0efec;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --chip:#eef1f5;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --surface-1:#1a1a19; --plane:#0d0d0d;
+    --text-primary:#f0efec; --text-secondary:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+    --div-pos:#3987e5; --div-neg:#e66767; --div-mid:#383835;
+    --chip:#242423;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --surface-1:#1a1a19; --plane:#0d0d0d;
+  --text-primary:#f0efec; --text-secondary:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --div-pos:#3987e5; --div-neg:#e66767; --div-mid:#383835;
+  --chip:#242423;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--text-primary);
+  font-family:system-ui,-apple-system,"Hiragino Sans","Yu Gothic",sans-serif;
+  font-size:15px;line-height:1.6;-webkit-text-size-adjust:100%}
+.wrap{max-width:1080px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;margin-bottom:4px}
+h1{font-size:20px;margin:0;letter-spacing:.01em}
+.sub{color:var(--text-secondary);font-size:13px;margin:0 0 14px}
+.btn{font:inherit;font-size:13px;padding:6px 12px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary)}
+.btn:hover{background:var(--chip)}
+.btn.primary{background:var(--s1);border-color:transparent;color:#fff}
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.badge{font-size:12px;color:var(--text-secondary);background:var(--chip);
+  border-radius:999px;padding:3px 10px;white-space:nowrap}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 16px}
+.tile{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:11px 13px}
+.tile .k{font-size:11.5px;color:var(--text-secondary);letter-spacing:.02em}
+.tile .v{font-size:25px;font-weight:650;line-height:1.25;margin-top:1px}
+.tile .n{font-size:11.5px;color:var(--muted)}
+
+nav.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--border);margin-bottom:14px}
+nav.tabs button{font:inherit;font-size:14px;padding:8px 13px;border:0;background:none;cursor:pointer;
+  color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-1px}
+nav.tabs button[aria-selected="true"]{color:var(--text-primary);border-bottom-color:var(--s1);font-weight:600}
+
+.card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:14px 14px 10px;margin-bottom:14px}
+.card h2{font-size:15px;margin:0 0 2px}
+.card p.note{font-size:12.5px;color:var(--text-secondary);margin:0 0 10px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+select,input[type=search]{font:inherit;font-size:13px;padding:5px 9px;border-radius:7px;
+  border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);max-width:100%}
+label.chk{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--text-secondary);
+  background:var(--chip);border-radius:999px;padding:4px 11px;cursor:pointer;user-select:none}
+label.chk input{accent-color:var(--s1);margin:0}
+.swatch{width:10px;height:10px;border-radius:3px;display:inline-block}
+
+.chartbox{position:relative}
+svg{display:block;width:100%;height:auto;overflow:visible;touch-action:pan-y}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);margin:4px 0 2px}
+.legend span.it{display:inline-flex;align-items:center;gap:6px}
+.tip{position:absolute;pointer-events:none;background:var(--surface-1);border:1px solid var(--border);
+  border-radius:8px;padding:7px 10px;font-size:12.5px;box-shadow:0 4px 14px rgba(0,0,0,.14);
+  white-space:nowrap;opacity:0;transition:opacity .08s;z-index:5}
+.tip b{font-weight:650}
+.tip .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.tip .row .nm{display:inline-flex;align-items:center;gap:6px}
+.num{font-variant-numeric:tabular-nums}
+
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border-bottom:1px solid var(--grid);padding:6px 8px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--text-secondary);font-weight:600;font-size:12px;position:sticky;top:0;background:var(--surface-1)}
+.scroll{overflow:auto;max-height:70vh;-webkit-overflow-scrolling:touch}
+td.num,th.num{font-variant-numeric:tabular-nums}
+
+dialog{border:1px solid var(--border);border-radius:14px;background:var(--surface-1);color:var(--text-primary);
+  padding:0;max-width:640px;width:calc(100% - 32px)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:18px}
+.dlg h3{margin:0 0 6px;font-size:16px}
+.dlg ol{margin:8px 0 12px;padding-left:20px;font-size:13.5px;color:var(--text-secondary)}
+textarea{width:100%;height:170px;font:inherit;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  border:1px solid var(--border);border-radius:8px;padding:8px;background:var(--plane);color:var(--text-primary);resize:vertical}
+.dlgfoot{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:10px;flex-wrap:wrap}
+.status{font-size:12.5px;color:var(--text-secondary);margin-right:auto}
+.status.ok{color:var(--good)}
+.status.ng{color:var(--critical)}
+.insight{font-size:13px;color:var(--text-secondary);background:var(--chip);border-radius:9px;padding:9px 12px;margin-top:8px}
+.insight b{color:var(--text-primary)}
+@media (max-width:600px){
+  .wrap{padding:12px}
+  h1{font-size:17px}
+  .tile .v{font-size:21px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1>北洋牧場　馬体重ビューア</h1>
+  </div>
+  <div class="tools">
+    <span class="badge" id="asof">データ時点 —</span>
+    <button class="btn" id="btnTheme" type="button">表示切替</button>
+    <button class="btn primary" id="btnUpdate" type="button">データ更新</button>
+  </div>
+</header>
+<p class="sub">入力はGoogleスプレッドシート。このページは見るだけの画面です。</p>
+
+<div class="tiles" id="tiles"></div>
+
+<nav class="tabs" id="tabs" role="tablist"></nav>
+<div id="panels"></div>
+
+<p class="sub" style="margin-top:18px">
+※ 月齢は 1ヶ月 = 30.44日 で換算し、前後の測定値から直線補間しています。
+</p>
+</div>
+
+<dialog id="dlg"><div class="dlg">
+  <h3>スプレッドシートからデータを取り込む</h3>
+  <ol>
+    <li>スプレッドシートで「体重入力」または「出来事」シートを開く</li>
+    <li><b>⌘A</b> で全選択 → <b>⌘C</b> でコピー</li>
+    <li>下の枠をクリックして <b>⌘V</b> で貼り付け → 「取り込む」</li>
+  </ol>
+  <textarea id="pasteArea" placeholder="ここに貼り付け"></textarea>
+  <div class="dlgfoot">
+    <span class="status" id="pasteStatus">体重入力・出来事のどちらでも自動で判別します。</span>
+    <button class="btn" id="btnReset" type="button">初期データに戻す</button>
+    <button class="btn" id="btnClose" type="button">閉じる</button>
+    <button class="btn primary" id="btnApply" type="button">取り込む</button>
+  </div>
+</div></dialog>
+
+<script>
+(function(){
+"use strict";
+const DPM = 30.44;
+const LS  = "hokuyo-weight-viewer-v1";
+const SNAPSHOT = {"asof":"","horses":[],"dams":[],"events":[]};
+const COH = [
+  {key:"2024", label:"2024年産駒", v:"--s1"},
+  {key:"2025", label:"2025年産駒", v:"--s2"},
+  {key:"2026", label:"2026年産駒", v:"--s3"},
+];
+const KINDS = ["離乳","退厩","入厩","グループ変更","放牧地変更","飼料変更","クリープ変更","治療・処置","事故・怪我","天候","その他"];
+const MONTHS = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+
+/* ---------- data ---------- */
+let DATA = (function(){
+  try{ const s = localStorage.getItem(LS); if(s){ const o=JSON.parse(s); if(o&&o.horses&&o.horses.length) return o; } }catch(e){}
+  return JSON.parse(JSON.stringify(SNAPSHOT));
+})();
+function persist(){ try{ localStorage.setItem(LS, JSON.stringify(DATA)); }catch(e){} }
+
+const d2n = s => { const p=String(s).split("-").map(Number); return Date.UTC(p[0],p[1]-1,p[2])/86400000; };
+const n2d = n => { const dt=new Date(n*86400000); return dt.getUTCFullYear()+"-"+String(dt.getUTCMonth()+1).padStart(2,"0")+"-"+String(dt.getUTCDate()).padStart(2,"0"); };
+const jp   = s => { const p=String(s).split("-"); return (+p[1])+"/"+(+p[2]); };
+const jpY  = s => { const p=String(s).split("-"); return p[0]+"/"+(+p[1])+"/"+(+p[2]); };
+
+let H = [], DAMS = [];
+function stem(n){ return String(n).replace(/\s*20\d\d\s*$/, "").trim(); }
+function deriveDams(hs){
+  if(DATA.dams && DATA.dams.length) return DATA.dams.filter(d=>d.foals.filter(n=>hs.some(h=>h.name===n)).length>=2);
+  const stems=[...new Set(hs.map(h=>stem(h.name)).filter(Boolean))].sort((a,b)=>b.length-a.length);
+  const canon={};
+  stems.forEach(st=>{
+    const host=stems.find(o=>o!==st && o.length>st.length && o.indexOf(st)===0);
+    canon[st]= host && !canon[host] ? host : (canon[host]||host||st);
+  });
+  const g={};
+  hs.forEach(h=>{ const k=canon[stem(h.name)]||stem(h.name); if(!k) return; (g[k]=g[k]||[]).push(h.name); });
+  return Object.keys(g).filter(k=>g[k].length>=2).sort()
+    .map(k=>({dam:k, foals:g[k].sort()}));
+}
+function prep(){
+  H = DATA.horses.map(h=>{
+    const b = d2n(h.birth);
+    const P = h.pts.map(p=>({d:p[0], t:d2n(p[0])-b, m:(d2n(p[0])-b)/DPM, w:+p[1]}))
+                   .filter(p=>isFinite(p.w)&&p.t>=0).sort((a,c)=>a.t-c.t);
+    return Object.assign({}, h, {b:b, P:P});
+  }).filter(h=>h.P.length);
+  DAMS = deriveDams(H);
+}
+function at(P,m){
+  const t=m*DPM;
+  if(!P.length||t<P[0].t-1e-9||t>P[P.length-1].t+1e-9) return null;
+  for(let i=0;i<P.length-1;i++){
+    if(P[i].t<=t && t<=P[i+1].t){
+      const a=P[i], c=P[i+1];
+      return c.t===a.t ? a.w : a.w+(t-a.t)/(c.t-a.t)*(c.w-a.w);
+    }
+  }
+  return P[P.length-1].w;
+}
+const STD=[[0,1.75],[.25,1.5],[.5,1.35],[2,1.35],[3,1.2],[4,1.0],[6,.85],[9,.65],[12,.5],[18,.40],[24,.30]];
+function stdDG(m){
+  if(m<=0) return STD[0][1];
+  for(let i=0;i<STD.length-1;i++){ const a=STD[i],c=STD[i+1];
+    if(m>=a[0]&&m<=c[0]) return a[1]+(m-a[0])/(c[0]-a[0])*(c[1]-a[1]); }
+  return STD[STD.length-1][1];
+}
+function median(a){ if(!a.length) return null; const s=a.slice().sort((x,y)=>x-y); const n=s.length;
+  return n%2 ? s[(n-1)/2] : (s[n/2-1]+s[n/2])/2; }
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* ---------- generic line chart ---------- */
+function lineChart(host, cfg){
+  const W=860, Hh=cfg.h||380, P={l:50,r:96,t:28,b:36};
+  const xd=cfg.xDom, yd=cfg.yDom;
+  const sx = x => P.l + (x-xd[0])/(xd[1]-xd[0])*(W-P.l-P.r);
+  const sy = y => Hh-P.b - (y-yd[0])/(yd[1]-yd[0])*(Hh-P.t-P.b);
+  let s = `<svg viewBox="0 0 ${W} ${Hh}" role="img" aria-label="${esc(cfg.aria||"")}">`;
+  // grid
+  cfg.yTicks.forEach(t=>{ const y=sy(t);
+    s+=`<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W-P.r}" y2="${y.toFixed(1)}" stroke="${css("--grid")}" stroke-width="1"/>`;
+    s+=`<text x="${P.l-8}" y="${(y+4).toFixed(1)}" text-anchor="end" font-size="11" fill="${css("--muted")}" style="font-variant-numeric:tabular-nums">${cfg.yFmt?cfg.yFmt(t):t}</text>`;
+  });
+  if(cfg.ref!=null){ const y=sy(cfg.ref);
+    s+=`<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W-P.r}" y2="${y.toFixed(1)}" stroke="${css("--axis")}" stroke-width="1" stroke-dasharray="2 4"/>`;
+    s+=`<text x="${W-P.r+6}" y="${(y-5).toFixed(1)}" font-size="10.5" fill="${css("--muted")}">${esc(cfg.refLabel||"")}</text>`; }
+  cfg.xTicks.forEach(t=>{ const x=sx(t);
+    s+=`<text x="${x.toFixed(1)}" y="${Hh-P.b+17}" text-anchor="middle" font-size="11" fill="${css("--muted")}" style="font-variant-numeric:tabular-nums">${cfg.xFmt?cfg.xFmt(t):t}</text>`;
+  });
+  s+=`<line x1="${P.l}" y1="${Hh-P.b}" x2="${W-P.r}" y2="${Hh-P.b}" stroke="${css("--axis")}" stroke-width="1"/>`;
+  s+=`<text x="${W-P.r}" y="${Hh-P.b+32}" text-anchor="end" font-size="11" fill="${css("--muted")}">${esc(cfg.xLab||"")}</text>`;
+  s+=`<text x="${P.l-42}" y="${P.t-10}" font-size="11" fill="${css("--muted")}">${esc(cfg.yLab||"")}</text>`;
+  // series
+  const path = pts => pts.map((p,i)=>(i?"L":"M")+sx(p[0]).toFixed(1)+" "+sy(p[1]).toFixed(1)).join(" ");
+  (cfg.thin||[]).forEach(se=>{ if(se.pts.length<2) return;
+    s+=`<path d="${path(se.pts)}" fill="none" stroke="${se.color}" stroke-width="1" opacity="${se.opacity||.22}" stroke-linejoin="round"/>`; });
+  (cfg.series||[]).forEach(se=>{
+    if(se.pts.length<2) return;
+    s+=`<path d="${path(se.pts)}" fill="none" stroke="${se.color}" stroke-width="${se.width||2}" ${se.dash?`stroke-dasharray="${se.dash}"`:""} stroke-linejoin="round" stroke-linecap="round"/>`;
+    if(se.dots) se.pts.forEach(p=>{ s+=`<circle cx="${sx(p[0]).toFixed(1)}" cy="${sy(p[1]).toFixed(1)}" r="4" fill="${se.color}" stroke="${css("--surface-1")}" stroke-width="2"/>`; });
+    if(se.label){ const last=se.pts[se.pts.length-1];
+      s+=`<text x="${(sx(last[0])+8).toFixed(1)}" y="${(sy(last[1])+4).toFixed(1)}" font-size="11.5" font-weight="600" fill="${se.color}">${esc(se.label)}</text>`; }
+  });
+  (cfg.rules||[]).forEach(r=>{ const x=sx(r.x); if(x<P.l||x>W-P.r) return;
+    s+=`<line x1="${x.toFixed(1)}" y1="${P.t}" x2="${x.toFixed(1)}" y2="${Hh-P.b}" stroke="${css("--muted")}" stroke-width="1" stroke-dasharray="3 3"/>`;
+    s+=`<text x="${(x+3).toFixed(1)}" y="${P.t+10}" font-size="10" fill="${css("--muted")}">${esc(r.label)}</text>`; });
+  s+=`<line id="cross" x1="0" y1="${P.t}" x2="0" y2="${Hh-P.b}" stroke="${css("--text-secondary")}" stroke-width="1" opacity="0"/>`;
+  s+=`<rect x="${P.l}" y="${P.t}" width="${W-P.l-P.r}" height="${Hh-P.t-P.b}" fill="transparent" id="hit"/>`;
+  s+="</svg>";
+  host.innerHTML = `<div class="chartbox">${s}<div class="tip"></div></div>`;
+  if(!cfg.hover) return;
+  const box=host.querySelector(".chartbox"), svg=host.querySelector("svg"),
+        tip=host.querySelector(".tip"), cross=svg.querySelector("#cross"), hit=svg.querySelector("#hit");
+  function move(ev){
+    const r=svg.getBoundingClientRect(); const px=(ev.clientX-r.left)/r.width*W;
+    if(px<P.l||px>W-P.r){ leave(); return; }
+    const xv = xd[0]+(px-P.l)/(W-P.l-P.r)*(xd[1]-xd[0]);
+    const info = cfg.hover(xv); if(!info){ leave(); return; }
+    const cx = sx(info.x);
+    cross.setAttribute("x1",cx); cross.setAttribute("x2",cx); cross.setAttribute("opacity","1");
+    tip.innerHTML = info.html; tip.style.opacity="1";
+    const left = cx/W*r.width;
+    tip.style.left = Math.min(Math.max(left+12, 4), r.width-tip.offsetWidth-4)+"px";
+    tip.style.top  = Math.max(6, (ev.clientY-r.top)-tip.offsetHeight-10)+"px";
+  }
+  function leave(){ cross.setAttribute("opacity","0"); tip.style.opacity="0"; }
+  hit.addEventListener("pointermove",move); hit.addEventListener("pointerdown",move);
+  box.addEventListener("pointerleave",leave);
+}
+
+/* ---------- views ---------- */
+function cohortOf(k){ return COH.find(c=>c.key===k); }
+function visibleCohorts(){ return COH.filter(c=>document.querySelector(`#ck-${c.key}`)?.checked !== false); }
+
+function medianCurve(key, mMax){
+  const hs=H.filter(h=>h.cohort===key); const out=[];
+  const need=Math.max(3, Math.ceil(hs.length*0.6));
+  let started=false;
+  for(let m=0;m<=mMax;m+=0.5){
+    const vs=hs.map(h=>at(h.P,m)).filter(v=>v!=null);
+    if(vs.length>=need){ out.push([m, median(vs)]); started=true; }
+    else if(started) break;
+  }
+  return out;
+}
+
+function viewGrowth(el){
+  const mMax=24;
+  const thin=[], series=[];
+  visibleCohorts().forEach(c=>{
+    const col=css(c.v);
+    H.filter(h=>h.cohort===c.key).forEach(h=>{
+      thin.push({pts:h.P.map(p=>[p.m,p.w]), color:col});
+    });
+    const mc=medianCurve(c.key,mMax);
+    if(mc.length) series.push({pts:mc, color:col, width:2.5, label:c.key});
+  });
+  const all=[].concat(...thin.map(t=>t.pts.map(p=>p[1])));
+  const yMax=Math.ceil((Math.max(...all,100)+20)/50)*50;
+  lineChart(el, {
+    h:400, xDom:[0,mMax], yDom:[0,yMax],
+    xTicks:[0,3,6,9,12,15,18,21,24], yTicks:Array.from({length:yMax/100+1},(_,i)=>i*100),
+    xLab:"月齢", yLab:"体重 kg", aria:"月齢ごとの体重。細い線が1頭ずつ、太い線が産駒年の中央値。",
+    thin, series,
+    hover:(xv)=>{
+      const m=Math.round(xv*2)/2;
+      let rows="";
+      visibleCohorts().forEach(c=>{
+        const hs=H.filter(h=>h.cohort===c.key);
+        const vs=hs.map(h=>at(h.P,m)).filter(v=>v!=null);
+        if(!vs.length) return;
+        rows+=`<div class="row"><span class="nm"><span class="swatch" style="background:${css(c.v)}"></span>${c.label}</span><b class="num">${Math.round(median(vs))} kg</b></div>`;
+      });
+      if(!rows) return null;
+      return {x:m, html:`<div style="margin-bottom:3px"><b>${m}ヶ月</b> <span style="color:${css("--muted")}">中央値</span></div>${rows}`};
+    }
+  });
+}
+
+function viewDam(el, dam){
+  const grp = DAMS.find(d=>d.dam===dam) || DAMS[0];
+  if(!grp){ el.innerHTML=`<p class="note">データを取り込むと表示されます。</p>`; return; }
+  const series=[], legend=[];
+  let mMax=0;
+  grp.foals.forEach(nm=>{
+    const h=H.find(x=>x.name===nm); if(!h) return;
+    const c=cohortOf(h.cohort); if(!c) return;
+    const pts=h.P.map(p=>[p.m,p.w]);
+    mMax=Math.max(mMax, pts[pts.length-1][0]);
+    series.push({pts, color:css(c.v), width:2.5, dots:pts.length<=20, label:nm.replace(/20\d\d$/,m=>m)});
+    legend.push({label:nm, color:css(c.v)});
+  });
+  const top=Math.ceil((Math.max(100,...series.flatMap(s=>s.pts.map(p=>p[1])))+30)/50)*50;
+  const xMax=Math.max(6,Math.ceil(mMax));
+  lineChart(el, {
+    h:360, xDom:[0,xMax], yDom:[0,top],
+    xTicks:Array.from({length:Math.floor(xMax/3)+1},(_,i)=>i*3),
+    yTicks:Array.from({length:top/100+1},(_,i)=>i*100),
+    xLab:"月齢", yLab:"体重 kg", aria:dam+"の産駒を月齢で重ねた比較",
+    series,
+    hover:(xv)=>{
+      const m=Math.round(xv*2)/2; let rows="";
+      series.forEach(s=>{ const h=H.find(x=>x.name===s.label); if(!h) return;
+        const v=at(h.P,m); if(v==null) return;
+        rows+=`<div class="row"><span class="nm"><span class="swatch" style="background:${s.color}"></span>${s.label}</span><b class="num">${Math.round(v)} kg</b></div>`; });
+      if(!rows) return null;
+      return {x:m, html:`<div style="margin-bottom:3px"><b>${m}ヶ月</b></div>${rows}`};
+    }
+  });
+}
+
+function dgSeries(key){
+  const hs=H.filter(h=>h.cohort===key);
+  const bins={};
+  hs.forEach(h=>{
+    for(let i=0;i<h.P.length-1;i++){
+      const a=h.P[i],c=h.P[i+1], dt=c.t-a.t; if(dt<=0) continue;
+      const dg=(c.w-a.w)/dt, mid=(a.m+c.m)/2, b=Math.round(mid);
+      if(b<0||b>24) continue; (bins[b]=bins[b]||[]).push(dg);
+    }
+  });
+  return Object.keys(bins).map(Number).sort((a,b)=>a-b)
+    .filter(b=>bins[b].length>=3).map(b=>[b, median(bins[b])]);
+}
+function viewDG(el){
+  const series=[];
+  visibleCohorts().forEach(c=>{ const p=dgSeries(c.key);
+    if(p.length) series.push({pts:p, color:css(c.v), width:2.5, dots:true, label:c.key}); });
+  series.push({pts:Array.from({length:49},(_,i)=>[i/2, stdDG(i/2)]), color:css("--muted"), width:2, dash:"6 4", label:"標準"});
+  lineChart(el, {
+    h:340, xDom:[0,24], yDom:[0,2],
+    xTicks:[0,3,6,9,12,15,18,21,24], yTicks:[0,0.5,1,1.5,2], yFmt:t=>t.toFixed(1),
+    ref:1.0, refLabel:"1kg/日",
+    xLab:"月齢", yLab:"kg/日", aria:"月齢ごとの1日増体。破線は飼料標準。",
+    series,
+    hover:(xv)=>{
+      const m=Math.round(xv); let rows="";
+      visibleCohorts().forEach(c=>{ const p=dgSeries(c.key).find(x=>x[0]===m); if(!p) return;
+        rows+=`<div class="row"><span class="nm"><span class="swatch" style="background:${css(c.v)}"></span>${c.label}</span><b class="num">${p[1].toFixed(2)}</b></div>`; });
+      rows+=`<div class="row"><span class="nm" style="color:${css("--muted")}">標準</span><b class="num">${stdDG(m).toFixed(2)}</b></div>`;
+      return {x:m, html:`<div style="margin-bottom:3px"><b>${m}ヶ月ごろ</b> <span style="color:${css("--muted")}">kg/日</span></div>${rows}`};
+    }
+  });
+}
+
+function seasonData(){
+  const bins=Array.from({length:12},()=>[]);
+  H.forEach(h=>{
+    for(let i=0;i<h.P.length-1;i++){
+      const a=h.P[i],c=h.P[i+1], dt=c.t-a.t; if(dt<=0||dt>45) continue;
+      const dg=(c.w-a.w)/dt, mid=(a.m+c.m)/2, exp=stdDG(mid); if(exp<=0) continue;
+      const mday=(d2n(a.d)+d2n(c.d))/2, mo=new Date(mday*86400000).getUTCMonth();
+      bins[mo].push(dg/exp*100);
+    }
+  });
+  return bins.map(b=>b.length?{v:median(b), n:b.length}:{v:null,n:0});
+}
+function viewSeason(el){
+  const data=seasonData();
+  const W=860,Hh=340,P={l:50,r:16,t:34,b:40};
+  const vals=data.filter(d=>d.v!=null).map(d=>d.v);
+  const top=Math.max(140, Math.ceil(Math.max(...vals,100)/20)*20);
+  const sy=v=>Hh-P.b-(v/top)*(Hh-P.t-P.b);
+  const bw=(W-P.l-P.r)/12;
+  let s=`<svg viewBox="0 0 ${W} ${Hh}" role="img" aria-label="暦月ごとの増体達成率">`;
+  [0,50,100,top].forEach(t=>{ const y=sy(t);
+    s+=`<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W-P.r}" y2="${y.toFixed(1)}" stroke="${t===100?css("--axis"):css("--grid")}" stroke-width="${t===100?1.5:1}" ${t===100?'stroke-dasharray="5 4"':""}/>`;
+    s+=`<text x="${P.l-8}" y="${(y+4).toFixed(1)}" text-anchor="end" font-size="11" fill="${css("--muted")}" style="font-variant-numeric:tabular-nums">${t}%</text>`; });
+  data.forEach((d,i)=>{
+    const x=P.l+i*bw+3, w=bw-6;
+    if(d.v==null){ s+=`<text x="${(x+w/2).toFixed(1)}" y="${Hh-P.b-6}" text-anchor="middle" font-size="10" fill="${css("--muted")}">—</text>`; }
+    else{
+      const y=sy(d.v), h=Hh-P.b-y, col=d.v>=100?css("--div-pos"):css("--div-neg");
+      s+=`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(1,h).toFixed(1)}" rx="4" fill="${col}" stroke="${css("--surface-1")}" stroke-width="2"><title>${MONTHS[i]}　${Math.round(d.v)}%　(${d.n}件)</title></rect>`;
+      s+=`<text x="${(x+w/2).toFixed(1)}" y="${(y-6).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="600" fill="${css("--text-primary")}" style="font-variant-numeric:tabular-nums">${Math.round(d.v)}</text>`;
+    }
+    s+=`<text x="${(x+w/2).toFixed(1)}" y="${Hh-P.b+17}" text-anchor="middle" font-size="11" fill="${css("--muted")}">${MONTHS[i]}</text>`;
+  });
+  s+=`<line x1="${P.l}" y1="${Hh-P.b}" x2="${W-P.r}" y2="${Hh-P.b}" stroke="${css("--axis")}"/>`;
+  s+=`<text x="${P.l-42}" y="${P.t-12}" font-size="11" fill="${css("--muted")}">達成率</text></svg>`;
+  el.innerHTML=`<div class="chartbox">${s}</div>`;
+  const worst=data.map((d,i)=>({...d,i})).filter(d=>d.v!=null).sort((a,b)=>a.v-b.v).slice(0,3);
+  const best =data.map((d,i)=>({...d,i})).filter(d=>d.v!=null).sort((a,b)=>b.v-a.v).slice(0,3);
+  el.insertAdjacentHTML("beforeend",
+    `<div class="insight">飼料標準から期待される増体を100%としたとき、実測がその何%だったかを暦月ごとに見ています（月齢の違いは補正済み）。
+     伸びにくい月は <b>${worst.map(d=>MONTHS[d.i]+" "+Math.round(d.v)+"%").join("・")}</b>、
+     伸びる月は <b>${best.map(d=>MONTHS[d.i]+" "+Math.round(d.v)+"%").join("・")}</b>。</div>`);
+}
+
+function viewTable(el){
+  const months=[0,1,2,3,4,5,6,7,8,9,10,11,12,15,18,21,24];
+  let s=`<div class="scroll"><table><thead><tr><th>馬名</th><th>産駒年</th><th>生年月日</th>`+
+    months.map(m=>`<th class="num">${m}ヶ月</th>`).join("")+`</tr></thead><tbody>`;
+  COH.forEach(c=>{
+    H.filter(h=>h.cohort===c.key).forEach(h=>{
+      s+=`<tr><td>${esc(h.name)}</td><td><span class="swatch" style="background:${css(c.v)}"></span> ${c.key}</td><td class="num">${jpY(h.birth)}</td>`;
+      months.forEach(m=>{ const v=at(h.P,m); s+=`<td class="num">${v==null?"":Math.round(v)}</td>`; });
+      s+=`</tr>`;
+    });
+  });
+  s+=`</tbody></table></div>`;
+  el.innerHTML=s;
+}
+
+function viewEvents(el){
+  const ev=(DATA.events||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
+  if(!ev.length){ el.innerHTML=`<p class="note">出来事シートを取り込むと、ここに一覧が出ます。</p>`; return; }
+  let s=`<div class="scroll"><table><thead><tr><th>日付</th><th>対象</th><th>種類</th><th>内容</th><th>メモ</th></tr></thead><tbody>`;
+  ev.forEach(e=>{ s+=`<tr><td class="num">${jpY(e.date)}</td><td>${esc(e.target)}</td><td>${esc(e.kind)}</td><td>${esc(e.detail||"")}</td><td>${esc(e.memo||"")}</td></tr>`; });
+  el.innerHTML=s+`</tbody></table></div>`;
+}
+
+/* ---------- tiles ---------- */
+function tiles(){
+  if(!H.length){ document.getElementById("tiles").innerHTML="";
+    document.getElementById("asof").textContent="データ未取り込み"; return; }
+  const foals=H.filter(h=>h.cohort===COH[2].key);
+  let lastDate=""; H.forEach(h=>{ const d=h.P[h.P.length-1].d; if(d>lastDate) lastDate=d; });
+  const newest=lastDate?d2n(lastDate):0;
+  const gone=h=>{
+    const last=h.P[h.P.length-1];
+    const left=(DATA.events||[]).some(e=>e.target===h.name&&(e.kind==="退厩"));
+    return left || (newest-d2n(last.d))>60;
+  };
+  const waiting=foals.filter(h=>{
+    const last=h.P[h.P.length-1];
+    const weaned=(DATA.events||[]).some(e=>e.target===h.name&&e.kind==="離乳");
+    return !weaned && !gone(h) && last.w<250;
+  });
+  const dgs=[];
+  foals.filter(h=>!gone(h)).forEach(h=>{ const n=h.P.length; if(n<2) return;
+    const a=h.P[n-2],c=h.P[n-1]; if(c.t>a.t) dgs.push((c.w-a.w)/(c.t-a.t)); });
+  const avgDG=dgs.length?dgs.reduce((x,y)=>x+y,0)/dgs.length:null;
+  const t=[
+    {k:"離乳待ち（当歳・250kg未満）", v:waiting.length+" 頭", n:waiting.length?waiting.map(h=>h.name.replace("2026","")).join("・"):"なし"},
+    {k:"当歳の直近 1日増体（平均）", v:avgDG==null?"—":avgDG.toFixed(2), n:"kg/日　標準との比 "+(avgDG==null?"—":Math.round(avgDG/stdDG(median(foals.filter(h=>!gone(h)).map(h=>h.P[h.P.length-1].m)))*100)+"%")},
+    {k:"最終測定日", v:lastDate?jpY(lastDate):"—", n:"登録 "+H.length+" 頭"},
+    {k:"記録された出来事", v:((DATA.events||[]).length)+" 件", n:"離乳・退厩・群・放牧地など"},
+  ];
+  document.getElementById("tiles").innerHTML = t.map(x=>
+    `<div class="tile"><div class="k">${esc(x.k)}</div><div class="v num">${esc(x.v)}</div><div class="n">${esc(x.n)}</div></div>`).join("");
+  document.getElementById("asof").textContent = "データ時点 "+(lastDate?jpY(lastDate):"—");
+}
+
+/* ---------- tabs ---------- */
+const TABS=[
+  {id:"growth", label:"成長曲線",   build:body=>{
+      body.innerHTML=`<div class="card"><h2>月齢ごとの体重</h2>
+        <p class="note">細い線が1頭ずつ、太い線がその産駒年の中央値です。産駒年をまたいで同じ月齢で比べられます。</p>
+        <div class="controls" id="cohFilter"></div><div id="c1"></div>
+        <div class="legend" id="lg1"></div></div>`;
+      cohortFilter(document.getElementById("cohFilter"), ()=>{ viewGrowth(document.getElementById("c1")); legend(document.getElementById("lg1")); });
+      viewGrowth(document.getElementById("c1")); legend(document.getElementById("lg1"));
+    }},
+  {id:"dam", label:"母馬系統",  build:body=>{
+      const opts=DAMS;
+      body.innerHTML=`<div class="card"><h2>同じ母馬の産駒を重ねる</h2>
+        <p class="note">年による出来の違いが一番はっきり出る見方です。線の色は産駒年。</p>
+        <div class="controls"><label>母馬 <select id="damSel">${opts.map(d=>`<option>${esc(d.dam)}</option>`).join("")}</select></label></div>
+        <div id="c2"></div><div class="legend" id="lg2"></div></div>`;
+      const sel=document.getElementById("damSel");
+      const draw=()=>{ viewDam(document.getElementById("c2"), sel.value); legend(document.getElementById("lg2")); };
+      sel.addEventListener("change",draw); draw();
+    }},
+  {id:"dg", label:"1日増体", build:body=>{
+      body.innerHTML=`<div class="card"><h2>1日あたり何kg増えているか</h2>
+        <p class="note">破線が飼料標準から計算した目安、点線が「1日1kg」の線です。産駒年ごとの中央値を描いています。</p>
+        <div class="controls" id="cohFilter2"></div><div id="c3"></div><div class="legend" id="lg3"></div>
+        <div class="insight">1日1kgを保てるのは<b>おおむね4〜5ヶ月まで</b>です。それ以降 0.6〜0.7kg/日は正常な落ち方で、異常ではありません。</div></div>`;
+      cohortFilter(document.getElementById("cohFilter2"), ()=>{ viewDG(document.getElementById("c3")); legend(document.getElementById("lg3"),true); });
+      viewDG(document.getElementById("c3")); legend(document.getElementById("lg3"),true);
+    }},
+  {id:"season", label:"月別の伸び", build:body=>{
+      body.innerHTML=`<div class="card"><h2>暦の月ごとの伸び方</h2>
+        <p class="note">同じ馬でも季節で増体は変わります。月齢の影響を取り除いて、暦の月だけを見ています。</p>
+        <div id="c4"></div></div>`;
+      viewSeason(document.getElementById("c4"));
+    }},
+  {id:"table", label:"一覧表", build:body=>{
+      body.innerHTML=`<div class="card"><h2>月齢体重一覧</h2>
+        <p class="note">グラフと同じ数値を表にしたものです。空欄はその月齢の測定範囲外です。</p><div id="c5"></div></div>
+        <div class="card"><h2>出来事</h2><div id="c6"></div></div>`;
+      viewTable(document.getElementById("c5")); viewEvents(document.getElementById("c6"));
+    }},
+];
+function cohortFilter(host, on){
+  host.innerHTML = COH.map(c=>
+    `<label class="chk"><input type="checkbox" id="ck-${c.key}" checked><span class="swatch" style="background:${css(c.v)}"></span>${c.label}</label>`).join("");
+  host.querySelectorAll("input").forEach(i=>i.addEventListener("change",on));
+}
+function legend(host, withStd){
+  host.innerHTML = visibleCohorts().map(c=>
+    `<span class="it"><span class="swatch" style="background:${css(c.v)}"></span>${c.label}</span>`).join("")
+    + (withStd?`<span class="it"><span class="swatch" style="background:${css("--muted")}"></span>飼料標準</span>`:"");
+}
+let current="growth";
+function renderTabs(){
+  document.getElementById("tabs").innerHTML = TABS.map(t=>
+    `<button role="tab" data-id="${t.id}" aria-selected="${t.id===current}">${t.label}</button>`).join("");
+  document.querySelectorAll("#tabs button").forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.id; renderAll(); }));
+}
+function renderAll(){
+  prep(); tiles(); renderTabs();
+  const body=document.getElementById("panels");
+  if(!H.length){
+    body.innerHTML=`<div class="card"><h2>まだデータがありません</h2>
+      <p class="note">このページは数値を持っていません。スプレッドシートから取り込むと表示されます。取り込んだデータはこのブラウザの中だけに保存され、どこにも送信されません。</p>
+      <ol style="font-size:13.5px;color:var(--text-secondary);padding-left:20px;margin:6px 0 10px">
+        <li>スプレッドシートの「体重入力」シートを開く</li>
+        <li>⌘A で全選択 → ⌘C でコピー</li>
+        <li>右上の「データ更新」→ 枠に ⌘V → 「取り込む」</li>
+      </ol>
+      <p class="note">同じ手順で「出来事」シートも取り込めます。</p></div>`;
+    return;
+  }
+  (TABS.find(t=>t.id===current)||TABS[0]).build(body);
+}
+
+/* ---------- paste import ---------- */
+function parseDateCell(s, seedYear){
+  s=String(s).trim(); if(!s) return null;
+  let m=s.match(/^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+  if(m) return {y:+m[1],mo:+m[2],d:+m[3]};
+  m=s.match(/^(\d{1,2})[\/\-月](\d{1,2})/);
+  if(m) return {y:seedYear,mo:+m[1],d:+m[2], partial:true};
+  return null;
+}
+const iso=o=>o.y+"-"+String(o.mo).padStart(2,"0")+"-"+String(o.d).padStart(2,"0");
+
+function parseWeightSheet(rows){
+  // pass 1: split into blocks of {header:[{i,cell}], horses:[row]}
+  const blocks=[]; let cur=null;
+  for(const r of rows){
+    const nm=(r[0]||"").trim(), bd=parseDateCell(r[1]||"",2000);
+    if(nm && bd && !bd.partial){ if(cur) cur.horses.push(r); continue; }
+    const cells=[];
+    for(let i=4;i<r.length;i++){ const p=parseDateCell(r[i],2000); if(p) cells.push({i:i,p:p}); }
+    if(cells.length>=2){ cur={header:cells, horses:[]}; blocks.push(cur); }
+  }
+  // pass 2: resolve header years per block, then read weights
+  const horses=[];
+  blocks.forEach(bk=>{
+    if(!bk.horses.length) return;
+    const births=bk.horses.map(r=>parseDateCell(r[1],2000)).filter(Boolean);
+    if(!births.length) return;
+    const bSort=births.slice().sort((a,b)=>a.y-b.y||a.mo-b.mo||a.d-b.d);
+    const first=bSort[0];
+    let seed=first.y;
+    const h0=bk.header[0].p;
+    if(h0.partial && (h0.mo<first.mo || (h0.mo===first.mo && h0.d<first.d))) seed=first.y+1;
+    const hdr=[]; let y=seed, prev=null;
+    bk.header.forEach(t=>{
+      let o=t.p;
+      if(o.partial){
+        if(prev && (o.mo<prev.mo || (o.mo===prev.mo && o.d<prev.d))) y++;
+        o={y:y, mo:o.mo, d:o.d};
+      } else { y=o.y; }
+      prev={mo:o.mo, d:o.d};
+      hdr.push({i:t.i, iso:iso(o)});
+    });
+    bk.horses.forEach(r=>{
+      const nm=(r[0]||"").trim(), bd=parseDateCell(r[1],2000);
+      const bw=(r[2]!=null && String(r[2]).trim()!=="" && isFinite(+r[2]) && +r[2]>0) ? +r[2] : null;
+      const pts=[];
+      if(bw!=null) pts.push([iso(bd), bw]);
+      hdr.forEach(h=>{ const v=r[h.i];
+        if(v!=null && String(v).trim()!=="" && isFinite(+v) && +v>0) pts.push([h.iso, +v]); });
+      if(pts.length) horses.push({name:nm, birth:iso(bd), bw:bw, pts:pts});
+    });
+  });
+  return horses;
+}
+function parseEventSheet(rows){
+  const ev=[];
+  rows.forEach(r=>{
+    const d=parseDateCell(r[0]||"",2026); if(!d||d.partial) return;
+    const kind=(r[2]||"").trim(); if(!kind) return;
+    ev.push({date:iso(d), target:(r[1]||"").trim(), kind:kind, detail:(r[3]||"").trim(), memo:(r[4]||"").trim()});
+  });
+  return ev;
+}
+function looksLikeEvents(rows){
+  return rows.some(r=>{ const d=parseDateCell(r[0]||"",2026); return d && !d.partial && KINDS.indexOf((r[2]||"").trim())>=0; });
+}
+function handlePaste(txt){
+  const rows=txt.replace(/\r/g,"").split("\n").map(l=>l.split("\t"));
+  const st=document.getElementById("pasteStatus");
+  if(looksLikeEvents(rows)){
+    const ev=parseEventSheet(rows);
+    if(!ev.length){ st.className="status ng"; st.textContent="出来事が読み取れませんでした。"; return; }
+    DATA.events=ev; persist(); renderAll();
+    st.className="status ok"; st.textContent="出来事 "+ev.length+" 件を取り込みました。";
+    return;
+  }
+  const hs=parseWeightSheet(rows);
+  if(hs.length<3){ st.className="status ng"; st.textContent="体重データが読み取れませんでした（"+hs.length+"頭）。シート全体をコピーしてください。"; return; }
+  const byName={}; DATA.horses.forEach(h=>byName[h.name]=h);
+  hs.forEach(n=>{
+    const old=byName[n.name];
+    n.cohort = old?old.cohort : (n.name.match(/(20\d\d)\s*$/)?n.name.match(/(20\d\d)\s*$/)[1]:String(new Date(n.birth).getFullYear()));
+    n.dam = old?old.dam:"";
+  });
+  DATA.horses=hs; persist(); renderAll();
+  st.className="status ok"; st.textContent=hs.length+"頭を取り込みました。";
+}
+
+/* ---------- boot ---------- */
+document.getElementById("btnTheme").addEventListener("click",()=>{
+  const cur=document.documentElement.getAttribute("data-theme");
+  const next = cur==="dark" ? "light" : cur==="light" ? "dark"
+    : (matchMedia("(prefers-color-scheme: dark)").matches?"light":"dark");
+  document.documentElement.setAttribute("data-theme",next);
+  try{localStorage.setItem(LS+"-theme",next);}catch(e){}
+  renderAll();
+});
+try{ const th=localStorage.getItem(LS+"-theme"); if(th) document.documentElement.setAttribute("data-theme",th); }catch(e){}
+const dlg=document.getElementById("dlg");
+document.getElementById("btnUpdate").addEventListener("click",()=>{ document.getElementById("pasteStatus").className="status";
+  document.getElementById("pasteStatus").textContent="体重入力・出来事のどちらでも自動で判別します。"; dlg.showModal(); });
+document.getElementById("btnClose").addEventListener("click",()=>dlg.close());
+document.getElementById("btnApply").addEventListener("click",()=>handlePaste(document.getElementById("pasteArea").value));
+document.getElementById("btnReset").addEventListener("click",()=>{
+  DATA=JSON.parse(JSON.stringify(SNAPSHOT)); persist(); renderAll();
+  const st=document.getElementById("pasteStatus"); st.className="status ok"; st.textContent="初期データに戻しました。";
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",renderAll);
+renderAll();
+})();
+
+</script>
+</body>
+</html>
