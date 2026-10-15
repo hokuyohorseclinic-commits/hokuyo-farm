@@ -104,6 +104,14 @@ textarea{width:100%;height:170px;font:inherit;font-size:12px;font-family:ui-mono
 .status{font-size:12.5px;color:var(--text-secondary);margin-right:auto}
 .status.ok{color:var(--good)}
 .status.ng{color:var(--critical)}
+.lock{max-width:460px;margin:40px auto;background:var(--surface-1);border:1px solid var(--border);
+  border-radius:14px;padding:26px 24px;text-align:center}
+.lock h2{font-size:17px;margin:0 0 6px}
+.lock p{font-size:13px;color:var(--text-secondary);margin:0 0 16px;line-height:1.7}
+.lock input{font:inherit;font-size:15px;width:100%;padding:9px 12px;border-radius:9px;
+  border:1px solid var(--border);background:var(--plane);color:var(--text-primary);text-align:center}
+.lock .btn{margin-top:12px;width:100%;padding:10px}
+.lock .err{color:var(--critical);font-size:13px;margin-top:10px;min-height:1.2em}
 .insight{font-size:13px;color:var(--text-secondary);background:var(--chip);border-radius:9px;padding:9px 12px;margin-top:8px}
 .insight b{color:var(--text-primary)}
 @media (max-width:600px){
@@ -112,6 +120,7 @@ textarea{width:100%;height:170px;font:inherit;font-size:12px;font-family:ui-mono
   .tile .v{font-size:21px}
 }
 </style>
+<script src="bataiju-data.js" onerror="window.__noData=1"></script>
 </head>
 <body>
 <div class="wrap">
@@ -122,21 +131,41 @@ textarea{width:100%;height:170px;font:inherit;font-size:12px;font-family:ui-mono
   <div class="tools">
     <span class="badge" id="asof">データ時点 —</span>
     <button class="btn" id="btnTheme" type="button">表示切替</button>
+    <button class="btn" id="btnKey" type="button" hidden>合鍵を変更</button>
     <button class="btn primary" id="btnUpdate" type="button">データ更新</button>
   </div>
 </header>
 <p class="sub">入力はGoogleスプレッドシート。このページは見るだけの画面です。</p>
 
+<div id="lock" hidden><div class="lock">
+  <h2>合鍵を入れてください</h2>
+  <p>このページのデータは暗号化されています。合鍵を知らない人には中身が読めません。<br>一度入れると、このブラウザでは次から聞かれません。</p>
+  <input type="password" id="pw" autocomplete="current-password" placeholder="合鍵">
+  <button class="btn primary" id="btnUnlock" type="button">開く</button>
+  <div class="err" id="lockErr"></div>
+</div></div>
+<div id="main">
 <div class="tiles" id="tiles"></div>
 
 <nav class="tabs" id="tabs" role="tablist"></nav>
 <div id="panels"></div>
+</div>
 
 <p class="sub" style="margin-top:18px">
 ※ 月齢は 1ヶ月 = 30.44日 で換算し、前後の測定値から直線補間しています。
 </p>
 </div>
 
+<dialog id="dlgKey"><div class="dlg">
+  <h3>合鍵を変更する</h3>
+  <p style="font-size:13px;color:var(--text-secondary);margin:0 0 10px">新しい合鍵で暗号化し直したデータファイルを書き出します。できたファイル（bataiju-data.js）をGitHubに置き換えると、次からは新しい合鍵になります。</p>
+  <input type="password" id="newPw" placeholder="新しい合鍵" style="font:inherit;font-size:15px;width:100%;padding:9px 12px;border-radius:9px;border:1px solid var(--border);background:var(--plane);color:var(--text-primary)">
+  <div class="dlgfoot">
+    <span class="status" id="keyStatus"></span>
+    <button class="btn" id="btnKeyClose" type="button">閉じる</button>
+    <button class="btn primary" id="btnKeyGo" type="button">書き出す</button>
+  </div>
+</div></dialog>
 <dialog id="dlg"><div class="dlg">
   <h3>スプレッドシートからデータを取り込む</h3>
   <ol>
@@ -144,7 +173,9 @@ textarea{width:100%;height:170px;font:inherit;font-size:12px;font-family:ui-mono
     <li><b>⌘A</b> で全選択 → <b>⌘C</b> でコピー</li>
     <li>下の枠をクリックして <b>⌘V</b> で貼り付け → 「取り込む」</li>
   </ol>
-  <textarea id="pasteArea" placeholder="ここに貼り付け"></textarea>
+  <p style="font-size:13px;color:var(--text-secondary);margin:0 0 8px">コピー＆ペーストができないときは、スプレッドシートで <b>ファイル → ダウンロード → カンマ区切り形式(.csv)</b> を選び、そのファイルをここで指定してください。</p>
+<input type="file" id="fileIn" accept=".csv,.tsv,.txt" style="font-size:13px;margin-bottom:10px">
+<textarea id="pasteArea" placeholder="または、ここに貼り付け"></textarea>
   <div class="dlgfoot">
     <span class="status" id="pasteStatus">体重入力・出来事のどちらでも自動で判別します。</span>
     <button class="btn" id="btnReset" type="button">初期データに戻す</button>
@@ -166,6 +197,32 @@ const COH = [
 ];
 const KINDS = ["離乳","退厩","入厩","グループ変更","放牧地変更","飼料変更","クリープ変更","治療・処置","事故・怪我","天候","その他"];
 const MONTHS = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+
+
+/* ---------- encryption (AES-GCM + PBKDF2) ---------- */
+const ENC = (typeof window!=="undefined" && window.HOKUYO_ENC) || null;
+const PWKEY = LS+"-pw";
+const b64d = b => Uint8Array.from(atob(b), c=>c.charCodeAt(0));
+const b64e = u => { let s=""; const a=new Uint8Array(u); for(let i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s); };
+async function deriveKey(pw, salt, iter){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2", salt:salt, iterations:iter, hash:"SHA-256"},
+    base, {name:"AES-GCM", length:256}, false, ["encrypt","decrypt"]);
+}
+async function decryptWith(pw){
+  const k = await deriveKey(pw, b64d(ENC.s), ENC.n||250000);
+  const buf = await crypto.subtle.decrypt({name:"AES-GCM", iv:b64d(ENC.i)}, k, b64d(ENC.c));
+  return JSON.parse(new TextDecoder().decode(buf));
+}
+async function encryptWith(pw, obj){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const iter = 250000;
+  const k = await deriveKey(pw, salt, iter);
+  const buf = await crypto.subtle.encrypt({name:"AES-GCM", iv:iv}, k,
+      new TextEncoder().encode(JSON.stringify(obj)));
+  return {s:b64e(salt), i:b64e(iv), n:iter, c:b64e(buf)};
+}
 
 /* ---------- data ---------- */
 let DATA = (function(){
@@ -681,7 +738,78 @@ document.getElementById("btnReset").addEventListener("click",()=>{
   const st=document.getElementById("pasteStatus"); st.className="status ok"; st.textContent="初期データに戻しました。";
 });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change",renderAll);
-renderAll();
+
+/* file import (for when copy/paste is not possible) */
+const fileIn=document.getElementById("fileIn");
+if(fileIn) fileIn.addEventListener("change", ()=>{
+  const f=fileIn.files && fileIn.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{ let t=String(rd.result);
+    if(f.name.toLowerCase().endsWith(".csv")) t=csv2tsv(t);
+    handlePaste(t); };
+  rd.readAsText(f, "utf-8");
+});
+function csv2tsv(t){
+  const out=[]; let row=[], cell="", q=false;
+  for(let i=0;i<t.length;i++){ const ch=t[i];
+    if(q){ if(ch==='"'){ if(t[i+1]==='"'){cell+='"';i++;} else q=false; } else cell+=ch; }
+    else if(ch==='"') q=true;
+    else if(ch===","){ row.push(cell); cell=""; }
+    else if(ch==="\n"){ row.push(cell); out.push(row.join("\t")); row=[]; cell=""; }
+    else if(ch!=="\r") cell+=ch;
+  }
+  row.push(cell); if(row.length) out.push(row.join("\t"));
+  return out.join("\n");
+}
+
+/* key change */
+const dlgKey=document.getElementById("dlgKey");
+document.getElementById("btnKey").addEventListener("click",()=>{document.getElementById("keyStatus").textContent="";dlgKey.showModal();});
+document.getElementById("btnKeyClose").addEventListener("click",()=>dlgKey.close());
+document.getElementById("btnKeyGo").addEventListener("click",async()=>{
+  const st=document.getElementById("keyStatus"), v=document.getElementById("newPw").value;
+  if(v.length<8){ st.className="status ng"; st.textContent="8文字以上にしてください。"; return; }
+  st.className="status"; st.textContent="暗号化しています…";
+  const blob=await encryptWith(v, DATA);
+  const txt="window.HOKUYO_ENC="+JSON.stringify(blob)+";\n";
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([txt],{type:"text/javascript"}));
+  a.download="bataiju-data.js"; document.body.appendChild(a); a.click(); a.remove();
+  try{ localStorage.setItem(PWKEY, v); }catch(e){}
+  st.className="status ok"; st.textContent="書き出しました。GitHubの bataiju-data.js を置き換えてください。";
+});
+
+/* unlock flow */
+const lockEl=document.getElementById("lock"), mainEl=document.getElementById("main");
+async function unlock(pw, remember){
+  try{
+    const obj = await decryptWith(pw);
+    DATA = obj; persist();
+    if(remember){ try{ localStorage.setItem(PWKEY, pw); }catch(e){} }
+    lockEl.hidden=true; mainEl.hidden=false;
+    document.getElementById("btnKey").hidden=false;
+    document.getElementById("btnUpdate").hidden=false;
+    renderAll();
+    return true;
+  }catch(e){ return false; }
+}
+(async function boot(){
+  if(ENC){
+    let pw=null; try{ pw=localStorage.getItem(PWKEY); }catch(e){}
+    if(pw && await unlock(pw,false)) return;
+    lockEl.hidden=false; mainEl.hidden=true;
+    document.getElementById("btnUpdate").hidden=true;
+    const err=document.getElementById("lockErr"), inp=document.getElementById("pw");
+    const go=async()=>{ err.textContent="";
+      const ok=await unlock(inp.value,true);
+      if(!ok){ err.textContent="合鍵が違います。"; inp.select(); } };
+    document.getElementById("btnUnlock").addEventListener("click",go);
+    inp.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); });
+    setTimeout(()=>inp.focus(),50);
+    return;
+  }
+  lockEl.hidden=true; mainEl.hidden=false; renderAll();
+})();
 })();
 
 </script>
