@@ -1,0 +1,13 @@
+{
+  "name": "北洋牧場 馬体重",
+  "short_name": "馬体重",
+  "start_url": "./bataiju-viewer.html",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#FFFFFF",
+  "icons": [
+    { "src": "bataiju-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "bataiju-icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "bataiju-icon-1024.png", "sizes": "1024x1024", "type": "image/png" }
+  ]
+}
