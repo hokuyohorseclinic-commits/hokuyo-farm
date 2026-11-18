@@ -104,6 +104,8 @@ function Badge({cat}){
   return <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full ${c}`}>{cat}</span>;
 }
 
+/* 立替経費の請求額（calcMonthInv と同じ税計算）。請求額にはすでに含まれているので、足し直さないこと */
+function advBilled(list){return list.reduce((s,e)=>s+(e.taxIncluded?e.amount:e.amount+Math.floor(e.amount*0.1)),0)}
 function calcMonthInv(horses,extras,y,m){
   const om={};
   horses.forEach(h=>{const amt=horseAmt(h,y,m);if(amt>0){if(!om[h.owner])om[h.owner]=0;om[h.owner]+=amt+Math.floor(amt*0.1)}});
@@ -1335,9 +1337,9 @@ function App({user}){
               </div>
               <div style={{textAlign:"right",marginLeft:24}}>
                 <p style={{fontSize:22,fontWeight:"bold",color:"#2563eb",margin:"4px 0"}}>¥{fmt(inv.total)}</p>
-                {advTotal>0&&<p style={{fontSize:12,color:"#4338ca",margin:"2px 0"}}>+立替 ¥{fmt(advTotal)}</p>}
+                {advTotal>0&&<p style={{fontSize:12,color:"#4338ca",margin:"2px 0"}}>うち立替 ¥{fmt(advBilled(monthAdv))}</p>}
                 {inv.carry>0&&<p style={{fontSize:12,color:"#dc2626",margin:"2px 0"}}>+前月繰越 ¥{fmt(inv.carry)}</p>}
-                {(advTotal>0||inv.carry>0)&&<p style={{fontSize:14,fontWeight:"bold",color:"#111827",margin:"2px 0"}}>ご請求合計 ¥{fmt(inv.total+advTotal+inv.carry)}</p>}
+                {inv.carry>0&&<p style={{fontSize:14,fontWeight:"bold",color:"#111827",margin:"2px 0"}}>ご請求合計 ¥{fmt(inv.total+inv.carry)}</p>}
                 <button style={{fontSize:12,background:"#eff6ff",color:"#1d4ed8",padding:"4px 12px",borderRadius:8,border:"none",cursor:"pointer",marginTop:4}} onClick={()=>setInvPrev(inv)}>プレビュー</button>
               </div>
             </div>
@@ -1371,11 +1373,11 @@ function App({user}){
           <tbody>{arData.map(d=>{
             const ek=`${iY}-${iM}`;
             const mAdv=(extras[ek]||[]).filter(e=>e.owner===d.owner&&e.isAdvance);
-            const advT=mAdv.reduce((s,c)=>s+c.amount,0);
-            const grandTotal=d.amount+d.carry+advT;
+            const advT=advBilled(mAdv); /* d.amount には立替経費が含まれている */
+            const grandTotal=d.amount+d.carry;
             return<tr key={d.owner} style={{borderBottom:"1px solid #f3f4f6"}}>
             <td style={{padding:"12px 16px",fontSize:14,fontWeight:500}}>{d.owner}</td>
-            <td style={{padding:"12px 16px",fontSize:14,textAlign:"right"}}>¥{fmt(d.amount)}</td>
+            <td style={{padding:"12px 16px",fontSize:14,textAlign:"right"}}>¥{fmt(d.amount-advT)}</td>
             <td style={{padding:"12px 16px",fontSize:14,textAlign:"right",color:advT>0?"#4338ca":"#9ca3af"}}>{advT>0?`¥${fmt(advT)}`:"—"}</td>
             <td style={{padding:"12px 16px",fontSize:14,textAlign:"right",color:d.carry>0?"#dc2626":"#9ca3af"}}>{d.carry>0?`¥${fmt(d.carry)}`:"—"}</td>
             <td style={{padding:"12px 16px",fontSize:14,textAlign:"right",fontWeight:"bold"}}>¥{fmt(grandTotal)}</td>
